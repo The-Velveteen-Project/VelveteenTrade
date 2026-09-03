@@ -1,0 +1,55 @@
+# VelveteenTrade strategy configuration.
+# Everything here is deterministic policy — the LLM cannot override any of it.
+
+universe:
+  # Liquid US large caps + sector/index ETFs. ~30 symbols keeps data and LLM costs low.
+  - SPY
+  - QQQ
+  - IWM
+  - XLE
+  - XLF
+  - XLK
+  - XLV
+  - GLD
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+  - AVGO
+  - JPM
+  - V
+  - UNH
+  - JNJ
+  - XOM
+  - CVX
+  - PG
+  - KO
+  - HD
+  - CAT
+  - BA
+  - DIS
+  - NFLX
+  - AMD
+
+candidates_per_cycle: 5   # symbols that get full LLM analysis per cycle (held positions always included)
+history_days: 320
+
+risk:
+  max_position_pct: 0.10
+  max_positions: 8
+  max_gross_exposure: 1.0
+  per_trade_risk_pct: 0.01
+  stop_atr_mult: 2.0
+  max_daily_turnover_pct: 0.25
+  max_drawdown_halt_pct: 0.10
+  min_conviction: 3
+  max_cvar_95_20d: -0.25
+  max_sector_exposure_pct: 0.30
+
+models:
+  provider: openai        # openai | anthropic — switch here or via LLM_PROVIDER env var
+  # analyst: gpt-5-mini   # uncomment to override defaults
+  # executive: gpt-5

@@ -1,0 +1,12 @@
+alpaca-py>=0.30
+openai>=1.40
+anthropic>=0.34
+pydantic>=2.7
+pandas>=2.2
+numpy>=1.26
+PyYAML>=6.0
+python-dotenv>=1.0
+yfinance>=0.2.40
+pypdf>=4.0
+python-telegram-bot[job-queue]>=21.0
+pytest>=8.0

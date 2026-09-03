@@ -1,0 +1,10 @@
+[build]
+builder = "dockerfile"
+
+[deploy]
+restartPolicyType = "ALWAYS"
+
+# Attach a volume mounted at /data in the Railway dashboard so journal.db and
+# profile.yaml survive deploys. Set these service variables:
+#   ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_PAPER=true,
+#   OPENAI_API_KEY, LLM_PROVIDER=openai, TELEGRAM_BOT_TOKEN, DATA_DIR=/data

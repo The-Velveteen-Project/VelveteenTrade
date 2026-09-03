@@ -1,0 +1,18 @@
+name: Carlos
+tolerance: 1
+horizon_years: 0.5
+experience: BASIC
+max_drawdown_comfort: 0.15
+income_stability: STABLE
+has_emergency_fund: false
+has_high_interest_debt: true
+capital: 200.0
+goals: Me gustaría invertirlo para salir de deudas en un corto plazo y, si es posible,
+  que genere algo mensual para ayudar a pagar las cuotas.
+notes: 'Sin fondo de emergencia. Deudas en tarjetas y un préstamo de libre consumo
+  (~USD 1,800) con tasa cercana al 27% anual. Ingresos estables entre USD 1,000 y
+  1,800 (a veces 2,000). Considera invertir USD 2,000–3,000 si la rentabilidad fuera
+  alta, pero de forma conservadora iniciaría con ~USD 200. Si invierte 2,000 necesitaría
+  retirar ~USD 200 mensuales; si invierte 200–300 podría dejarlos hasta 12 meses.
+  Experiencia previa: trading y FOREX (perdió), también CDTs y cajas de ahorro NU.
+  Ante una caída de –15%, dijo que dejaría la inversión quieta hasta recuperar.'
