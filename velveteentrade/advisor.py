@@ -47,6 +47,9 @@ honesto puede prometerlo; lo que sí se controla es el riesgo, los costes y la d
 frena con amabilidad y recomienda no invertir ese dinero.
 - Cuando ya tengas TODO lo necesario (las 6 áreas), despídete brevemente resumiendo lo que \
 entendiste y termina tu último mensaje con la marca exacta: [PERFIL_COMPLETO]
+- La marca [PERFIL_COMPLETO] SOLO puede ir en un mensaje que NO contenga ninguna pregunta: \
+si acabas de preguntar algo, espera la respuesta antes de cerrar. Tu mensaje final es un \
+resumen y una despedida, nunca una pregunta.
 """
 
 EXTRACT_SYSTEM = (
@@ -85,12 +88,23 @@ Nada de jerga sin explicar. Nada de promesas."""
 
 def interview(llm: StructuredLLM, model: str, transcript: list[dict],
               user_message: str) -> tuple[str, bool]:
-    """One turn of the interview. Returns (assistant_reply, is_complete)."""
+    """One turn of the interview. Returns (assistant_reply, is_complete).
+
+    Guard: the completion marker is only honored when the reply carries no
+    pending question — a model that asks and closes in the same breath would
+    otherwise finalize the profile with a guessed answer.
+    """
     transcript.append({"role": "user", "content": user_message})
     reply = llm.chat(model, INTERVIEW_SYSTEM, transcript)
-    transcript.append({"role": "assistant", "content": reply})
-    done = "[PERFIL_COMPLETO]" in reply
-    return reply.replace("[PERFIL_COMPLETO]", "").strip(), done
+    clean = reply.replace("[PERFIL_COMPLETO]", "").strip()
+    done = "[PERFIL_COMPLETO]" in reply and "?" not in clean[-300:]
+    if "[PERFIL_COMPLETO]" in reply and not done:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Completion marker ignored: reply still contains a question.")
+    transcript.append({"role": "assistant", "content": clean})
+    return clean, done
 
 
 def extract_profile(llm: StructuredLLM, model: str, transcript: list[dict]) -> RiskProfile:
