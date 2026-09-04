@@ -238,13 +238,22 @@ def run_bot(settings: Settings) -> None:
         await update.message.reply_text(
             format_estado(_broker(), journal, prof.capital if prof else None))
 
+    def _cycle_in_thread():
+        """SQLite connections are thread-bound: the cycle thread opens its own
+        Journal instead of borrowing the bot's main-thread connection."""
+        data = MarketData(settings.alpaca_key, settings.alpaca_secret, settings.cache_dir)
+        j = Journal(settings.db_path)
+        try:
+            return run_cycle(settings, _broker(), data, llm, j)
+        finally:
+            j.close()
+
     async def ciclo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Corriendo el ciclo — un par de minutos…")
-        data = MarketData(settings.alpaca_key, settings.alpaca_secret, settings.cache_dir)
         import asyncio
 
         try:
-            summary = await asyncio.to_thread(run_cycle, settings, _broker(), data, llm, journal)
+            summary = await asyncio.to_thread(_cycle_in_thread)
             await _send_long(ctx.bot, update.effective_chat.id,
                              format_cycle_summary(summary, journal))
         except Exception as exc:  # noqa: BLE001
@@ -268,9 +277,8 @@ def run_bot(settings: Settings) -> None:
         import asyncio
 
         chat_id = journal.get_float("telegram_chat_id")
-        data = MarketData(settings.alpaca_key, settings.alpaca_secret, settings.cache_dir)
         try:
-            summary = await asyncio.to_thread(run_cycle, settings, _broker(), data, llm, journal)
+            summary = await asyncio.to_thread(_cycle_in_thread)
             if chat_id:
                 await ctx.bot.send_message(int(chat_id),
                                            "📊 Ciclo diario automático\n\n"
