@@ -36,9 +36,61 @@ AYUDA = (
     "/start — entrevista del asesor (crea o rehace tu perfil)\n"
     "/plan — tu plan explicado\n"
     "/estado — cuenta, posiciones y órdenes\n"
+    "/informe — informe del día: P&L, posiciones y decisiones\n"
     "/ciclo — correr un ciclo de trading ahora\n"
     "/ayuda — esta lista"
 )
+
+
+def format_informe(broker, journal: Journal, capital: float | None) -> str:
+    """Deterministic daily report — real numbers, no hallucinated brackets."""
+    from datetime import date
+
+    acct = broker.account()
+    hist = journal.equity_history()
+    today = date.today().isoformat()
+    lines = [f"📋 Informe — {today}"]
+
+    if hist:
+        eq0, eq_now = hist[0][1], hist[-1][1]
+        pnl = eq_now - eq0
+        pct = (pnl / eq0 * 100) if eq0 else 0.0
+        lines.append(f"Capital de trabajo: {_fmt_money(eq_now)} "
+                     f"({'+' if pnl >= 0 else ''}{_fmt_money(pnl)}, {pct:+.2f}% desde el inicio)")
+    elif capital:
+        lines.append(f"Capital de trabajo: {_fmt_money(capital)} (sin ciclos registrados aún)")
+
+    if acct.positions:
+        lines.append("\nPosiciones:")
+        for p in acct.positions.values():
+            pnl_p = p.market_value - p.qty * p.avg_entry
+            lines.append(f"  {p.symbol}: {p.qty:g} @ {_fmt_money(p.avg_entry)} → "
+                         f"{_fmt_money(p.market_value)} ({'+' if pnl_p >= 0 else ''}{_fmt_money(pnl_p)})")
+    else:
+        lines.append("\nSin posiciones abiertas.")
+
+    pending = broker.open_orders()
+    if pending:
+        lines.append("Órdenes en cola: " +
+                     ", ".join(f"{o.side.upper()} {o.symbol} x{o.qty:g}" for o in pending))
+
+    todays = [r for r in journal.recent(60) if r["ts"][:10] == today]
+    if todays:
+        lines.append("\nDecisiones de hoy:")
+        for r in todays:
+            d = r.get("decision") or {}
+            v = r.get("verdict") or {}
+            mark = "✅" if r.get("executed") else ("✋" if v and not v.get("approved") else "·")
+            extra = f" conv {d.get('conviction')}/5" if d.get("conviction") else ""
+            lines.append(f"  {mark} {r['symbol']} {d.get('action', v.get('action', ''))}{extra}")
+            if r.get("executed") and d.get("thesis"):
+                first_sentence = d["thesis"].split(". ")[0][:180]
+                lines.append(f"     {first_sentence}.")
+    else:
+        lines.append("\nHoy no hubo ciclo todavía (corre a las 21:30 UTC, o /ciclo).")
+
+    lines.append("\nRecuerda: paper trading, fase de evidencia. Sin promesas — solo historial.")
+    return "\n".join(lines)
 
 
 def _fmt_money(x: float) -> str:
@@ -187,6 +239,17 @@ def run_bot(settings: Settings) -> None:
                         f"tolerancia efectiva {profile_mod.effective_tolerance(prof)}/5, "
                         f"capital ${prof.capital or 'n/d'}]"
                         if prof else "[Contexto: el usuario aún no tiene perfil — sugiérele /start]")
+        # The chat must see the REAL system state — an advisor that improvises
+        # numbers or claims "no trades today" blindly is worse than no advisor.
+        try:
+            snapshot = await asyncio.to_thread(
+                format_informe, _broker(), Journal(settings.db_path),
+                prof.capital if prof else None)
+            context_note += ("\n[Estado real del sistema ahora mismo — usa ESTOS datos, "
+                             "no inventes cifras ni pidas comandos:]\n" + snapshot)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Chat context snapshot failed: %s", exc)
+            context_note += "\n[No pude leer el estado del sistema ahora — dilo si te lo preguntan.]"
         history.append({"role": "user", "content": text})
         from .advisor import CHAT_SYSTEM
 
@@ -238,6 +301,15 @@ def run_bot(settings: Settings) -> None:
         await update.message.reply_text(
             format_estado(_broker(), journal, prof.capital if prof else None))
 
+    async def informe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        import asyncio
+
+        prof = profile_mod.load(settings.profile_path)
+        text = await asyncio.to_thread(
+            format_informe, _broker(), Journal(settings.db_path),
+            prof.capital if prof else None)
+        await _send_long(ctx.bot, update.effective_chat.id, text)
+
     def _cycle_in_thread():
         """SQLite connections are thread-bound: the cycle thread opens its own
         Journal instead of borrowing the bot's main-thread connection."""
@@ -267,6 +339,7 @@ def run_bot(settings: Settings) -> None:
     app.add_handler(CommandHandler("start", _guarded(start)))
     app.add_handler(CommandHandler("plan", _guarded(plan)))
     app.add_handler(CommandHandler("estado", _guarded(estado)))
+    app.add_handler(CommandHandler("informe", _guarded(informe)))
     app.add_handler(CommandHandler("ciclo", _guarded(ciclo)))
     app.add_handler(CommandHandler("ayuda", _guarded(ayuda)))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _guarded(on_text)))
