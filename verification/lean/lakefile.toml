@@ -1,0 +1,5 @@
+name = "velveteen_risk"
+defaultTargets = ["VelveteenRisk"]
+
+[[lean_lib]]
+name = "VelveteenRisk"

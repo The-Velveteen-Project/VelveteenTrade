@@ -123,12 +123,17 @@ def run_cycle(
         except Exception as exc:
             log.warning("Skipping %s — data error: %s", symbol, exc)
 
+    # The context carries a shadow portfolio (positions, gross, sectors) that
+    # every approved order updates, so caps hold across the whole cycle, not
+    # just per decision. Stopped-out positions stay counted until the next
+    # cycle's broker snapshot — conservative, since their sells may not fill.
     ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors)
-    ctx.seed_sector_exposure(account)
+    ctx.seed(account)
 
     # ------------------------------------------ 2. Deterministic stops FIRST
     entries = journal.entry_prices()
-    for verdict in risk.check_stops(account, snaps, settings.risk, entries):
+    for verdict in risk.check_stops(account, snaps, settings.risk, entries,
+                                    stops=journal.stop_prices()):
         if verdict.symbol in pending_symbols:
             log.warning("Stop hit on %s but an order is already pending — not doubling.",
                         verdict.symbol)
@@ -207,6 +212,8 @@ def run_cycle(
                 # Provisional entry price (last close); reconciled to the real
                 # fill from the broker at the start of the next cycle.
                 journal.set_entry_price(symbol, snap.close)
+                if verdict.stop_price is not None:
+                    journal.set_stop(symbol, verdict.stop_price)
             else:
                 journal.clear_entry(symbol)
             summary["orders"].append(f"{side.upper()} {symbol} x{verdict.qty}")

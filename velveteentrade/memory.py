@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS entries (
     entry_price REAL NOT NULL,
     entry_ts TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS stops (
+    symbol TEXT PRIMARY KEY,
+    stop_price REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS lessons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -60,7 +64,21 @@ class Journal:
 
     def clear_entry(self, symbol: str) -> None:
         self._conn.execute("DELETE FROM entries WHERE symbol = ?", (symbol,))
+        self._conn.execute("DELETE FROM stops WHERE symbol = ?", (symbol,))
         self._conn.commit()
+
+    def set_stop(self, symbol: str, stop_price: float) -> None:
+        """Freeze the stop computed by the risk gate at buy time (see risk.check_stops)."""
+        self._conn.execute(
+            "INSERT INTO stops (symbol, stop_price) VALUES (?, ?) "
+            "ON CONFLICT(symbol) DO UPDATE SET stop_price=excluded.stop_price",
+            (symbol, float(stop_price)),
+        )
+        self._conn.commit()
+
+    def stop_prices(self) -> dict[str, float]:
+        rows = self._conn.execute("SELECT symbol, stop_price FROM stops").fetchall()
+        return {s: p for s, p in rows}
 
     def entry_prices(self) -> dict[str, float]:
         rows = self._conn.execute("SELECT symbol, entry_price FROM entries").fetchall()
@@ -126,7 +144,11 @@ class Journal:
         held = set(positions)
         for symbol in list(self.entry_prices()):
             if symbol not in held:
-                self.clear_entry(symbol)
+                # Entry only: a frozen stop must survive a buy that is still
+                # queued (not yet a position). It is cleared on sell/stop, and
+                # overwritten by the next approved buy of the symbol.
+                self._conn.execute("DELETE FROM entries WHERE symbol = ?", (symbol,))
+        self._conn.commit()
         for symbol, pos in positions.items():
             if pos.avg_entry and pos.avg_entry > 0:
                 self.set_entry_price(symbol, float(pos.avg_entry))

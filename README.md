@@ -56,13 +56,24 @@ python -m velveteentrade journal       # decision history
 
 Strategy policy (universe, risk limits, models) lives in `config.yaml`. Secrets live in `.env` and are never committed.
 
+## Formal verification
+
+The claim "hard limits no prompt can override" is a theorem, not a slogan:
+`verification/lean/VelveteenRisk.lean` models the risk gate over exact rationals
+and proves in Lean 4 that **for any sequence of LLM proposals, a portfolio that
+starts within its caps ends within its caps** (`cycle_safe`), plus per-trade
+risk and stop bounds. Formalizing it exposed a cycle-level bug in the original
+gate (caps checked against a stale broker snapshot), now fixed — the
+counterexample is itself machine-checked (`old_gate_unsafe`). Scope and limits
+(floats, model fidelity, fills) are spelled out in `verification/README.md`.
+
 ## Tests
 
 ```bash
 python -m pytest tests/ -q
 ```
 
-The suite covers the indicator math, every risk-gate rule, and an end-to-end pipeline dry run with a mock broker and mock LLM — no network or API keys needed.
+The suite covers the indicator math, every risk-gate rule, the cycle-level invariants proved in Lean (fuzzed over random cycles), and an end-to-end pipeline dry run with a mock broker and mock LLM — no network or API keys needed.
 
 ## Scheduling
 
