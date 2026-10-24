@@ -141,6 +141,9 @@ def format_cycle_summary(summary: dict, journal: Journal) -> str:
     lines = ["Ciclo completado."]
     if summary.get("stops"):
         lines.append("🛑 Stops ejecutados: " + ", ".join(summary["stops"]))
+    if summary.get("stops_unchecked"):
+        lines.append("⚠️ Stop SIN revisar (no hay precio válido): "
+                     + ", ".join(summary["stops_unchecked"]) + ". Revisa esas posiciones a mano.")
     if summary.get("orders"):
         lines.append("\nÓrdenes:")
         recent = {r["symbol"]: r for r in journal.recent(30)}

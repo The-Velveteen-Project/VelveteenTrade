@@ -1,6 +1,8 @@
 """Deterministic technical indicators. Pure pandas/numpy — no LLM anywhere near this file."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -40,7 +42,7 @@ def historical_cvar(close: pd.Series, horizon: int = 20, alpha: float = 0.95) ->
     Honest, assumption-free tail estimate. Negative number, e.g. -0.12 means the
     average of the worst 5% of 20-day windows lost 12%.
     """
-    rets = close.pct_change(horizon).dropna()
+    rets = close.pct_change(horizon, fill_method=None).dropna()
     if len(rets) < 60:
         return None
     var = rets.quantile(1 - alpha)
@@ -49,27 +51,42 @@ def historical_cvar(close: pd.Series, horizon: int = 20, alpha: float = 0.95) ->
 
 
 def snapshot(symbol: str, df: pd.DataFrame) -> TechnicalSnapshot:
-    """Compute a full indicator snapshot from an OHLCV daily dataframe."""
+    """Compute a full indicator snapshot from an OHLCV daily dataframe.
+
+    The last close must be a finite positive number, or this raises (B3): the
+    pipeline then skips the symbol and the stop sweep falls back to the
+    broker's own mark. It never pretends a stale or blank price is today's.
+    Any other indicator that comes out non-finite (e.g. a blank cell inside
+    its window) is reported as None — missing, not NaN.
+    """
     close = df["close"]
     n = len(close)
+    last_close = float(close.iloc[-1]) if n else math.nan
+    if not (math.isfinite(last_close) and last_close > 0):
+        raise ValueError(f"{symbol}: last close is {last_close!r} — no valid price today")
+
+    def fin(v) -> float | None:
+        if v is None or pd.isna(v):
+            return None
+        v = float(v)
+        return v if math.isfinite(v) else None
 
     def last(series: pd.Series) -> float | None:
-        v = series.iloc[-1] if len(series) else np.nan
-        return None if pd.isna(v) else float(v)
+        return fin(series.iloc[-1]) if len(series) else None
 
     high_52w = close.tail(252).max() if n >= 20 else np.nan
     return TechnicalSnapshot(
         symbol=symbol,
-        close=float(close.iloc[-1]),
+        close=last_close,
         sma_50=last(close.rolling(50).mean()) if n >= 50 else None,
         sma_200=last(close.rolling(200).mean()) if n >= 200 else None,
         rsi_14=last(rsi(close)) if n >= 15 else None,
         atr_14=last(atr(df)) if n >= 15 else None,
-        momentum_63d=float(close.iloc[-1] / close.iloc[-64] - 1) if n >= 64 else None,
-        momentum_21d=float(close.iloc[-1] / close.iloc[-22] - 1) if n >= 22 else None,
+        momentum_63d=fin(last_close / close.iloc[-64] - 1) if n >= 64 else None,
+        momentum_21d=fin(last_close / close.iloc[-22] - 1) if n >= 22 else None,
         realized_vol_21d=last(realized_vol(close)) if n >= 22 else None,
-        hist_cvar_95_20d=historical_cvar(close),
-        dist_from_52w_high=float(close.iloc[-1] / high_52w - 1) if not pd.isna(high_52w) else None,
+        hist_cvar_95_20d=fin(historical_cvar(close)),
+        dist_from_52w_high=fin(last_close / high_52w - 1) if not pd.isna(high_52w) else None,
     )
 
 

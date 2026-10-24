@@ -226,7 +226,7 @@ def test_B2_seed_counts_pending_orders_once():
     # turnover: lo reservado (5 000 + 1 000) + pendientes que el libro no conoce
     # (venta 10 000 + parcial 4 000 + dólares 2 500); "b" no se cuenta dos veces.
     assert ctx.turnover_used == 6_000.0 + 10_000.0 + 4_000.0 + 2_500.0
-    assert ctx.pending_unpriced == []
+    assert ctx.unvalued == []
 
 
 def test_B2_unpriced_pending_order_halts_buys_not_sells():
@@ -235,7 +235,7 @@ def test_B2_unpriced_pending_order_halts_buys_not_sells():
     ctx = risk.CycleContext(peak_equity=EQ)
     ctx.seed(acct, pending=[OpenOrder(id="z", symbol="Z", qty=5, side="buy")],
              prices={"A": 100.0, "Z": float("nan")})
-    assert ctx.pending_unpriced == ["Z"]
+    assert ctx.unvalued == ["Z"]
     dec = lambda sym, act: ExecutiveDecision(symbol=sym, action=act, conviction=5, thesis="t",
                                              invalidation="i", horizon_days=10)
     v = risk.evaluate(dec("X", "BUY"), snap("X"), acct, RiskLimits(), ctx)
@@ -308,12 +308,35 @@ def _bars_with_nan_last_close(n=300):
 
 
 def test_repro_B3a_nan_close_reaches_the_gate_and_disables_the_stop():
-    s = indicators.snapshot("AAPL", _bars_with_nan_last_close())
-    assert math.isnan(s.close) and s.atr_14 == 2.0          # pydantic acepta NaN
+    # Regresión B3 (24 oct). Antes: snapshot.close = nan, atr = 2.0, y
+    # check_stops devolvía [] con el stop congelado en 96.
+    # 1) El NaN ya no llega: el snapshot se niega a existir sin precio válido.
+    try:
+        indicators.snapshot("AAPL", _bars_with_nan_last_close())
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    try:
+        snap("AAPL", close=float("nan"))
+        rejected = False
+    except Exception:                                    # pydantic ValidationError
+        rejected = True
+    assert rejected
+    # 2) Sin snapshot del día, el stop usa la marca del bróker y SÍ se dispara.
     acct = MockBroker(equity=EQ).state
-    acct.positions = {"AAPL": Position("AAPL", 50, 100.0, 5_000.0)}
-    # stop congelado en 96: con close NaN la comparación `close <= stop` es False
-    assert risk.check_stops(acct, {"AAPL": s}, RiskLimits(), {}, stops={"AAPL": 96.0}) == []
+    acct.positions = {"AAPL": Position("AAPL", 50, 100.0, 4_750.0)}       # marca 95
+    v = risk.check_stops(acct, {}, RiskLimits(), {}, stops={"AAPL": 96.0})
+    assert [(x.symbol, x.qty) for x in v] == [("AAPL", 50)]
+    # 3) Y si un NaN llegara por otro camino (model_construct salta pydantic):
+    nan_snap = TechnicalSnapshot.model_construct(symbol="AAPL", close=float("nan"), atr_14=2.0)
+    v = risk.check_stops(acct, {"AAPL": nan_snap}, RiskLimits(), {}, stops={"AAPL": 96.0})
+    assert [(x.symbol, x.qty) for x in v] == [("AAPL", 50)]
+    # 4) Sin precio ni stop válidos: no se calla, queda en `unchecked`.
+    acct.positions = {"AAPL": Position("AAPL", 50, 100.0, float("nan"))}
+    unchecked = []
+    assert risk.check_stops(acct, {}, RiskLimits(), {}, stops={}, unchecked=unchecked) == []
+    assert unchecked == ["AAPL"]
 
 
 def test_repro_B3b_nan_sell_poisons_turnover_budget(tmp_path, monkeypatch):
@@ -322,25 +345,48 @@ def test_repro_B3b_nan_sell_poisons_turnover_budget(tmp_path, monkeypatch):
     broker = MockBroker(equity=EQ)
     broker.state.positions = {"AAPL": Position("AAPL", 50, 100.0, 5_000.0)}
     llm = ScriptedLLM(lambda x: dict(action="SELL" if x == "AAPL" else "BUY", conviction=5))
-    run_cycle(make_settings(tmp_path, "x", syms), broker, llm, monkeypatch, snaps,
-              data=FakeData(bars={"AAPL": _bars_with_nan_last_close()}))
+    summary, _ = run_cycle(make_settings(tmp_path, "x", syms), broker, llm, monkeypatch, snaps,
+                           data=FakeData(bars={"AAPL": _bars_with_nan_last_close()}))
     bought = notional_of(broker.orders, {x: 100.0 for x in syms})
-    assert ("AAPL", 50, "sell") in broker.orders
-    assert bought == 60_000.0 and bought > EQ * RiskLimits().max_daily_turnover_pct  # 60 % > 25 %
+    # Regresión B3 (24 oct). Antes: SELL AAPL aprobada con NaN, turnover NaN y
+    # 60 000 comprados con tope de 25 000. Ahora AAPL no tiene precio del día:
+    # no se analiza ni se vende por el LLM, y el turnover sigue limitando.
+    assert ("AAPL", 50, "sell") not in broker.orders
+    assert bought == 20_000.0 and bought <= EQ * RiskLimits().max_daily_turnover_pct
+    assert "AAPL" not in summary["analyzed"]
 
 
 def test_repro_B3c_nan_buy_crashes_after_mutating_the_shadow():
     ctx = risk.CycleContext(peak_equity=EQ)
     acct = MockBroker(equity=EQ).state
-    nan_snap = snap("X", close=float("nan"), atr=2.0)
-    try:
-        risk.evaluate(ExecutiveDecision(symbol="X", action="BUY", conviction=5, thesis="t",
-                                        invalidation="i", horizon_days=10),
-                      nan_snap, acct, RiskLimits(), ctx)
-        raised = False
-    except ValueError:                        # math.ceil(nan) en _stop_price
-        raised = True
-    assert raised and math.isnan(ctx.gross)   # la sombra quedó envenenada antes del error
+    nan_snap = TechnicalSnapshot.model_construct(symbol="X", close=float("nan"), atr_14=2.0,
+                                                 hist_cvar_95_20d=None)
+    dec = ExecutiveDecision(symbol="X", action="BUY", conviction=5, thesis="t",
+                            invalidation="i", horizon_days=10)
+    # Regresión B3 (24 oct). Antes: ValueError en _stop_price con ctx.gross ya NaN.
+    v = risk.evaluate(dec, nan_snap, acct, RiskLimits(), ctx)
+    assert not v.approved and "non-finite" in v.reasons[-1]
+    assert ctx.gross == 0.0 and ctx.turnover_used == 0.0 and ctx.held_notional == {}
+
+
+def test_B3_non_finite_position_value_halts_buys():
+    acct = MockBroker(equity=EQ).state
+    acct.positions = {"A": Position("A", 10, 100.0, float("nan"))}
+    ctx = risk.CycleContext(peak_equity=EQ)
+    dec = ExecutiveDecision(symbol="X", action="BUY", conviction=5, thesis="t",
+                            invalidation="i", horizon_days=10)
+    v = risk.evaluate(dec, snap("X"), acct, RiskLimits(), ctx)
+    assert ctx.unvalued == ["A"] and not v.approved and "could not be valued" in v.reasons[-1]
+
+
+def test_B3_blank_cell_inside_history_gives_none_not_nan():
+    df = _bars_with_nan_last_close()
+    df.iloc[-1, df.columns.get_loc("close")] = 100.0          # hoy hay precio...
+    df.iloc[-30, df.columns.get_loc("close")] = np.nan        # ...pero falta un día del pasado
+    s = indicators.snapshot("AAPL", df)
+    assert s.close == 100.0
+    for name, v in s.model_dump().items():
+        assert not (isinstance(v, float) and not math.isfinite(v)), name
 
 
 # ======================================================================

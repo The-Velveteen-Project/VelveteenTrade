@@ -44,6 +44,12 @@ log = logging.getLogger(__name__)
 MIN_ORDER_NOTIONAL = 1.0  # Alpaca's minimum for fractional orders
 
 
+def _finite(*xs: float | None) -> bool:
+    """True iff every value is a real number (B3: NaN makes every comparison
+    False, so a NaN input silently disables caps and stops)."""
+    return all(x is not None and math.isfinite(x) for x in xs)
+
+
 def _round_qty(x: float) -> float:
     """Fractional share quantity, floored to 3 decimals (never round up past a cap)."""
     return max(0.0, math.floor(x * 1000) / 1000)
@@ -73,7 +79,7 @@ class CycleContext:
     gross: float = 0.0                                                # sum of |exposure| (shadow)
     seeded: bool = False
     notes: list[str] = field(default_factory=list)
-    pending_unpriced: list[str] = field(default_factory=list)       # symbols we could not value
+    unvalued: list[str] = field(default_factory=list)       # symbols we could not value
 
     def sector_of(self, symbol: str) -> str:
         # Unknown sectors are per-symbol buckets, never lumped into a fake sector.
@@ -99,7 +105,7 @@ class CycleContext:
           (order id -> notional, from the journal's ledger) plus every pending
           order the ledger does not know, each counted once.
         - A pending order that cannot be valued (no finite positive price) is
-          recorded in `pending_unpriced`, and evaluate() then halts new buys:
+          recorded in `unvalued`, and evaluate() then halts new buys:
           if we cannot price what is committed, we do not add to it.
         """
         if self.seeded:
@@ -107,13 +113,16 @@ class CycleContext:
         prices = prices or {}
         booked = booked or {}
         for sym, pos in account.positions.items():
+            if not _finite(pos.market_value):
+                self.unvalued.append(sym)      # unknown exposure: halt buys (fail closed)
+                continue
             self._add_exposure(sym, abs(pos.market_value))
         self.turnover_used += sum(abs(n) for n in booked.values())
         for o in pending:
             px = prices.get(o.symbol)
             if o.remaining_qty > 0:
                 if px is None or not math.isfinite(px) or px <= 0:
-                    self.pending_unpriced.append(o.symbol)
+                    self.unvalued.append(o.symbol)
                     continue
                 value = o.remaining_qty * px
             elif o.notional:
@@ -162,6 +171,16 @@ def evaluate(
         v.reasons.append("HOLD — no order.")
         return v
 
+    # ------------------------------------------- B3: fail closed on NaN/inf
+    # Every check below is a comparison; with NaN they are all False and the
+    # gate would approve. Nothing is mutated before this point.
+    if not (_finite(snap.close, equity, ctx.gross, ctx.turnover_used)
+            and (snap.atr_14 is None or _finite(snap.atr_14))
+            and (held is None or _finite(held.qty))):
+        v.reasons.append("Rejected: non-finite input (price, ATR, equity or budget) — "
+                         "cannot evaluate caps.")
+        return v
+
     # ---------------------------------------------------------------- SELL
     if decision.action == "SELL":
         if held is None or held.qty <= 0 or decision.symbol not in ctx.held_notional:
@@ -176,10 +195,10 @@ def evaluate(
         return v
 
     # ----------------------------------------------------------------- BUY
-    if ctx.pending_unpriced:
+    if ctx.unvalued:
         v.reasons.append(
             "BUY rejected: pending orders on "
-            f"{sorted(set(ctx.pending_unpriced))} could not be valued — new buys halted this cycle."
+            f"{sorted(set(ctx.unvalued))} could not be valued — new buys halted this cycle."
         )
         return v
 
@@ -251,9 +270,12 @@ def evaluate(
     if _turnover_exceeded(notional, equity, limits, ctx, v):
         return v
 
+    # The stop is computed BEFORE the shadow is touched (B3c: it used to raise
+    # after _apply_buy, leaving the shadow mutated for an order never sent).
+    stop_price = _stop_price(snap.close, stop_distance)
     ctx._apply_buy(decision.symbol, notional)
     v.approved, v.qty = True, float(qty)
-    v.stop_price = _stop_price(snap.close, stop_distance)
+    v.stop_price = stop_price
     v.reasons.append(
         f"BUY approved: {qty} shares (~{notional / equity:.1%} of equity, ${notional:.2f}), "
         f"stop at {v.stop_price} ({limits.stop_atr_mult}x ATR), conviction {decision.conviction}/5."
@@ -263,7 +285,8 @@ def evaluate(
 
 def check_stops(account: AccountState, snaps: dict[str, TechnicalSnapshot], limits: RiskLimits,
                 entries: dict[str, float],
-                stops: dict[str, float] | None = None) -> list[RiskVerdict]:
+                stops: dict[str, float] | None = None,
+                unchecked: list[str] | None = None) -> list[RiskVerdict]:
     """Deterministic stop-loss sweep — runs without any LLM involvement.
 
     `stops` maps symbol -> stop price FROZEN at buy time (preferred). The stop
@@ -272,25 +295,38 @@ def check_stops(account: AccountState, snaps: dict[str, TechnicalSnapshot], limi
     longer be bounded by the risk budget it was sized with (G2).
     Positions without a frozen stop (opened before this rule) fall back to
     `entries[symbol] - stop_atr_mult * ATR`.
+
+    Price (B3): today's close if finite, else the broker's own mark
+    (market_value / qty). A stop is never skipped because one data source is
+    blank; if NO valid price or stop exists the position is logged as
+    unchecked (and listed in `unchecked`, when a list is passed).
     """
     stops = stops or {}
     verdicts = []
     for symbol, pos in account.positions.items():
         snap = snaps.get(symbol)
-        if snap is None:
-            continue
-        if symbol in stops:
+        price = snap.close if snap is not None and _finite(snap.close) else None
+        if price is None and _finite(pos.market_value, pos.qty) and pos.qty:
+            price = abs(pos.market_value / pos.qty)
+        if symbol in stops and _finite(stops[symbol]):
             stop = stops[symbol]
         else:
-            if snap.atr_14 is None:
-                continue
+            atr = snap.atr_14 if snap is not None else None
             entry = entries.get(symbol, pos.avg_entry)
-            stop = entry - limits.stop_atr_mult * snap.atr_14
-        if snap.close <= stop:
+            stop = entry - limits.stop_atr_mult * atr if _finite(atr, entry) else None
+        if price is None or stop is None:
+            log.error("STOP NOT CHECKED for %s: price=%r stop=%r — no valid data.",
+                      symbol, price, stop)
+            if unchecked is not None:
+                unchecked.append(symbol)
+            continue
+        if price <= stop:
             verdicts.append(
                 RiskVerdict(
                     symbol=symbol, approved=True, action="SELL", qty=pos.qty,
-                    reasons=[f"STOP hit: close {snap.close} <= stop {round(stop, 2)}."],
+                    reasons=[f"STOP hit: price {price} <= stop {round(stop, 2)}"
+                             + ("" if snap is not None and price == snap.close
+                                else " (broker mark; no valid close today)") + "."],
                 )
             )
     return verdicts

@@ -170,21 +170,25 @@ def _run_cycle(
     ctx.seed(account, pending=pending, prices=prices, booked=booked)
     summary["session"] = session
     summary["turnover_seeded"] = round(ctx.turnover_used, 2)
-    if ctx.pending_unpriced:
+    if ctx.unvalued:
         log.warning("Pending orders that cannot be valued: %s — new buys halted this cycle.",
-                    sorted(set(ctx.pending_unpriced)))
+                    sorted(set(ctx.unvalued)))
 
     # ------------------------------------------ 2. Deterministic stops FIRST
     entries = journal.entry_prices()
-    for verdict in risk.check_stops(account, snaps, settings.risk, entries,
-                                    stops=journal.stop_prices()):
+    unchecked: list[str] = []
+    stop_verdicts = risk.check_stops(account, snaps, settings.risk, entries,
+                                     stops=journal.stop_prices(), unchecked=unchecked)
+    summary["stops_unchecked"] = unchecked
+    for verdict in stop_verdicts:
         if verdict.symbol in pending_symbols:
             log.warning("Stop hit on %s but an order is already pending — not doubling.",
                         verdict.symbol)
             continue
         order_id = broker.submit_order(verdict.symbol, verdict.qty, "sell")
         if broker.sends_orders:
-            journal.book_turnover(session, order_id, verdict.qty * snaps[verdict.symbol].close)
+            journal.book_turnover(session, order_id,
+                                  verdict.qty * prices.get(verdict.symbol, float("inf")))
         journal.clear_entry(verdict.symbol)
         journal.record(JournalEntry(symbol=verdict.symbol, verdict=verdict, executed=True,
                                     note=f"stop-loss order {order_id}"))
