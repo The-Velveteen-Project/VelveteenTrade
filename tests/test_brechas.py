@@ -655,10 +655,31 @@ def test_repro_D3_shadow_diverges_from_real_portfolio_at_gate_level():
 #      (efecto ~1e-14 USD: divergencia de fidelidad, no riesgo económico).
 # ======================================================================
 def test_repro_D5_float_rounding_breaks_lean_hypotheses():
+    # Regresión D5 (24 oct). Antes: _round_qty(x) = 0.117 > x y el stop quedaba
+    # 4e-14 por debajo de c - d: las dos hipótesis del modelo eran falsas.
     x = 0.11699999999999999
-    assert Fraction(risk._round_qty(x)) > Fraction(x)                 # RoundDown.le_of_pos es falso
+    assert Fraction(risk._round_qty(x)) <= Fraction(x)                # RoundDown.le_of_pos
+    assert risk._round_qty(x) == 0.116
     c, d = 392.85, 2.0 * 3.945
-    assert Fraction(risk._stop_price(c, d)) < Fraction(c) - Fraction(d)   # stopPrice_ge es falso
+    assert Fraction(risk._stop_price(c, d)) >= Fraction(c) - Fraction(d)  # stopPrice_ge
+
+
+def test_D5_rounding_hypotheses_hold_exactly_on_random_floats():
+    """Las dos hipótesis, en aritmética exacta sobre los valores binarios, para
+    200 000 entradas aleatorias de escalas típicas y atípicas."""
+    import random
+    rng = random.Random(20261024)
+    for _ in range(100_000):
+        x = rng.choice([rng.uniform(0, 1), rng.uniform(0, 1e4), rng.uniform(0, 1e7)])
+        q = risk._round_qty(x)
+        assert 0 <= Fraction(q) <= Fraction(x)
+        assert Fraction(x) - Fraction(q) < Fraction(1, 1000) + Fraction(1, 10**9)  # no recorta de más
+    for _ in range(100_000):
+        c = rng.uniform(0.5, 5_000.0)
+        d = rng.uniform(0.0, c * 0.5)
+        st = risk._stop_price(c, d)
+        assert Fraction(st) >= Fraction(c) - Fraction(d)
+        assert Fraction(st) - (Fraction(c) - Fraction(d)) < Fraction(1, 100) + Fraction(1, 10**9)
 
 
 # ======================================================================

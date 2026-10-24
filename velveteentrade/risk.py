@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from .broker import AccountState, OpenOrder
 from .config import RiskLimits
@@ -50,15 +51,36 @@ def _finite(*xs: float | None) -> bool:
     return all(x is not None and math.isfinite(x) for x in xs)
 
 
+_MILLI = Decimal("0.001")
+_CENT = Decimal("0.01")
+
+
 def _round_qty(x: float) -> float:
-    """Fractional share quantity, floored to 3 decimals (never round up past a cap)."""
-    return max(0.0, math.floor(x * 1000) / 1000)
+    """Fractional share quantity, floored to 3 decimals (never round up past a cap).
+
+    Exact (D5, 24 Oct 2026): `floor(x * 1000) / 1000` in floats could round UP
+    — x = 0.11699999999999999 gave 0.117, because x * 1000 rounds to 117.0 —
+    so the Lean hypothesis `RoundDown` (rq x <= x) was false for the deployed
+    function. Decimal(x) is the exact binary value; flooring it gives
+    d <= x exactly, and the nearest double to d cannot exceed the double x."""
+    if not math.isfinite(x) or x <= 0:
+        return 0.0
+    return float(Decimal(x).quantize(_MILLI, rounding=ROUND_FLOOR))
 
 
 def _stop_price(close: float, stop_distance: float) -> float:
     """Stop rounded UP to the cent, so the real stop distance never exceeds the
-    one used for sizing (rounding down could add up to $0.005/share of risk)."""
-    return math.ceil((close - stop_distance) * 100) / 100
+    one used for sizing (rounding down could add up to $0.005/share of risk).
+
+    Exact (D5): the ceiling is taken on the exact value close - stop_distance;
+    if the nearest double to that cent lies below it, the stop moves up one
+    ulp. So `stop >= close - stop_distance` holds exactly — the Lean
+    hypothesis `stopPrice_ge` — not just up to 1e-14."""
+    exact = Decimal(close) - Decimal(stop_distance)
+    stop = float(exact.quantize(_CENT, rounding=ROUND_CEILING))
+    if Decimal(stop) < exact:
+        stop = math.nextafter(stop, math.inf)
+    return stop
 
 
 @dataclass
