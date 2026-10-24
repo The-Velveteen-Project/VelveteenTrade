@@ -487,20 +487,24 @@ def test_repro_B6a_capital_zero_means_full_account(tmp_path, monkeypatch):
     s = make_settings(tmp_path, "x", ["X"])
     save_profile(s.profile_path, capital=0.0)                         # "todavía no quiero invertir"
     broker = MockBroker(equity=EQ)
-    run_cycle(s, broker, buy_all(), monkeypatch, {"X": snap("X")})
-    assert broker.orders == [("X", 100.0, "buy")]                     # 10.000 USD = 10 % de la cuenta entera
+    summary, _ = run_cycle(s, broker, buy_all(), monkeypatch, {"X": snap("X")})
+    # Regresión B6a (24 oct). Antes: compra de 10 000 USD (10 % de la cuenta entera).
+    assert broker.orders == []
+    assert "no capital allocated" in summary["rejected"][0]
 
 
 def test_repro_B6b_satellite_losses_invisible_to_halt_and_track_record(tmp_path, monkeypatch):
     s = make_settings(tmp_path, "x", ["X"])
-    save_profile(s.profile_path, capital=1_000.0)
+    prof = save_profile(s.profile_path, capital=1_000.0)
+    sat = (1 - profile_mod.etf_core_weight(prof)) * 1_000.0             # 600 (núcleo 40 %)
     snaps = {"X": snap("X", close=10.0, atr=0.2)}
     broker = MockBroker(equity=EQ)
     _, j = run_cycle(s, broker, ScriptedLLM(lambda x: dict(action="HOLD")), monkeypatch, snaps)
-    broker.state.equity = EQ - 1_000.0           # se perdió el 100 % del capital declarado
+    broker.state.equity = EQ - 100.0             # el satélite pierde 100 (16,7 %)
     summary, j = run_cycle(s, broker, buy_all(), monkeypatch, snaps, journal=j)
-    assert [e for _, e in j.equity_history()] == [1_000.0, 1_000.0]   # el track record no lo ve
-    assert summary["orders"] == ["BUY X x10.0"]                       # el freno por drawdown no actúa
+    # Regresión B6b (24 oct). Antes: track record [1000, 1000] y la compra salía.
+    assert [e for _, e in j.equity_history()] == [sat, sat - 100.0]   # la pérdida se ve
+    assert summary["orders"] == [] and "drawdown" in summary["rejected"][0]  # 16,7 % > 12 %
 
 
 def test_repro_B6c_peak_from_full_account_halts_forever(tmp_path, monkeypatch):
@@ -510,7 +514,60 @@ def test_repro_B6c_peak_from_full_account_halts_forever(tmp_path, monkeypatch):
     _, j = run_cycle(s, broker, ScriptedLLM(lambda x: dict(action="HOLD")), monkeypatch, snaps)
     save_profile(s.profile_path, capital=200.0)     # el usuario hace /start después
     summary, j = run_cycle(s, broker, buy_all(), monkeypatch, snaps, journal=j)
-    assert summary["orders"] == [] and "drawdown" in summary["rejected"][0]  # 200 vs pico 100.000
+    # Regresión B6c (24 oct). Antes: «drawdown» para siempre (200 frente a un
+    # pico de 100 000). Ahora la base nueva reinicia el pico y la compra sale.
+    assert summary["orders"] and not any("drawdown" in r for r in summary["rejected"])
+    assert j.get_float("peak_equity") == 0.6 * 200.0
+
+
+def test_B6_capital_base_rules(tmp_path):
+    from velveteentrade import capital as capital_mod
+    j = Journal(tmp_path / "j.db")
+    prof = profile_mod.RiskProfile(name="U", tolerance=4, horizon_years=10, experience="INTERMEDIATE",
+                                   max_drawdown_comfort=0.2, income_stability="STABLE",
+                                   has_emergency_fund=True, capital=1_000.0)
+    b = capital_mod.resolve(j, prof, 100_000.0)
+    assert b.rebased and (b.allocated, b.value, b.sizing) == (600.0, 600.0, 600.0)
+    b = capital_mod.resolve(j, prof, 100_300.0)                       # ganancia: se ve, no se apalanca
+    assert not b.rebased and (b.value, b.sizing) == (900.0, 600.0)
+    b = capital_mod.resolve(j, prof, 99_700.0)                        # pérdida: se ve y achica
+    assert (b.value, b.sizing) == (300.0, 300.0)
+    b = capital_mod.resolve(j, prof, 99_000.0)                        # se perdió todo: no compra
+    assert (b.value, b.sizing) == (-400.0, 0.0)
+    b = capital_mod.resolve(j, prof.model_copy(update={"capital": 2_000.0}), 99_000.0)
+    assert b.rebased and b.allocated == 1_200.0 and j.get_float("peak_equity") == 1_200.0
+    b = capital_mod.resolve(j, prof.model_copy(update={"capital": 10**9}), 50.0)
+    assert b.rebased and b.sizing <= 50.0                             # nunca más que la cuenta
+    try:
+        profile_mod.RiskProfile(**dict(prof.model_dump(), capital=-5.0))
+        negative_ok = True
+    except Exception:
+        negative_ok = False
+    assert not negative_ok                                            # capital >= 0
+
+
+def test_B6_no_profile_keeps_the_existing_peak(tmp_path):
+    """Primera corrida de este código sin perfil: el pico viejo está en la misma
+    base (la cuenta) y no se pierde."""
+    from velveteentrade import capital as capital_mod
+    j = Journal(tmp_path / "j.db")
+    j.set_float("peak_equity", 120_000.0)
+    b = capital_mod.resolve(j, None, 100_000.0)
+    assert (b.value, b.sizing) == (100_000.0, 100_000.0)
+    assert j.get_float("peak_equity") == 120_000.0
+
+
+def test_B6_track_record_pnl_is_measured_within_the_current_base(tmp_path):
+    from velveteentrade import capital as capital_mod
+    j = Journal(tmp_path / "j.db")
+    capital_mod.resolve(j, None, 100_000.0); j.record_equity(100_000.0)
+    prof = profile_mod.RiskProfile(name="U", tolerance=4, horizon_years=10, experience="INTERMEDIATE",
+                                   max_drawdown_comfort=0.2, income_stability="STABLE",
+                                   has_emergency_fund=True, capital=1_000.0)
+    capital_mod.resolve(j, prof, 100_000.0); j.record_equity(600.0)
+    j.record_equity(550.0)
+    start, now, since = capital_mod.pnl_since_base(j)
+    assert (start, now) == (600.0, 550.0) and since                   # no -99 % por el salto de base
 
 
 # ======================================================================
@@ -524,8 +581,13 @@ def test_repro_B7_bot_keeps_startup_limits_after_new_profile(tmp_path, monkeypat
     want = profile_mod.limits_for(prof)
     assert want.min_conviction == 4 and want.max_position_pct == 0.05
     broker = MockBroker(equity=EQ)
-    run_cycle(s, broker, buy_all(conv=3), monkeypatch, {"X": snap("X")})  # = _cycle_in_thread
-    assert broker.orders == [("X", 100.0, "buy")]                     # conv 3 < 4 y 10 % > 5 %
+    summary, j = run_cycle(s, broker, buy_all(conv=3), monkeypatch, {"X": snap("X")})  # = _cycle_in_thread
+    # Regresión B7 (24 oct). Antes: compra de 100 acciones (10 %) con convicción 3.
+    assert broker.orders == [] and "conviction 3 < minimum 4" in summary["rejected"][0]
+    broker.session = date(2026, 10, 27)
+    run_cycle(s, broker, buy_all(conv=4), monkeypatch, {"X": snap("X")}, journal=j)
+    sat = (1 - profile_mod.etf_core_weight(prof)) * EQ
+    assert broker.orders and broker.orders[0][1] * 100.0 <= want.max_position_pct * sat + 1e-9
 
 
 # ======================================================================
@@ -548,8 +610,10 @@ def test_repro_B8_satellite_exceeds_core_satellite_split(tmp_path, monkeypatch):
         broker.session = date(2026, 10, 19 + day)
         _, j = run_cycle(s, broker, buy_all(), monkeypatch, snaps, journal=j)
     gross = sum(p.market_value for p in broker.state.positions.values()) / 10_000.0
-    assert satellite == 0.40 and gross > satellite                   # 0.64 > 0.40
-    assert abs(gross - 0.64) < 1e-9
+    # Regresión B8 (24 oct). Antes: satélite al 64 % del capital con 40 % prometido.
+    # Ahora se dimensiona contra el satélite (4 000): 8 posiciones de 8 % = 25,6 %.
+    assert satellite == 0.40 and gross <= satellite
+    assert abs(gross - 0.256) < 1e-9
 
 
 # ======================================================================

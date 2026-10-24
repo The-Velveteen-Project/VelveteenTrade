@@ -31,8 +31,9 @@ class RiskProfile(BaseModel):
         False, description="Credit cards, quick loans or similar expensive debt outstanding",
     )
     capital: Optional[float] = Field(
-        None, description="Amount they plan to invest, in account currency (USD), if shared. "
-                          "The engine sizes positions against this, not the full broker equity.",
+        None, ge=0, description="Amount they plan to invest, in account currency (USD), if shared. "
+                                "The engine sizes positions against this, not the full broker "
+                                "equity. 0 means nothing to invest yet.",
     )
     goals: str = Field("", description="Their goals in their own words, one or two sentences")
     notes: str = Field("", description="Anything else material the advisor learned")

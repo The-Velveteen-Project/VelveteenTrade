@@ -182,9 +182,14 @@ def _decision_rows(journal: Journal, limit: int = 60) -> str:
 
 
 def generate(journal: Journal, capital: float | None) -> str:
+    from .capital import current_base, pnl_since_base
+
     history = journal.equity_history()
-    equity_now = history[-1][1] if history else (capital or 0.0)
-    equity_start = history[0][1] if history else equity_now
+    seg = pnl_since_base(journal)
+    equity_start, equity_now, since = seg if seg else (capital or 0.0, capital or 0.0, None)
+    base = current_base(journal)
+    base_note = (f" Satélite gestionado {_fmt_money(base['allocated'])}, resultado medido desde "
+                 f"{since[:10]} (la curva salta cuando el perfil cambia la base)." if base and since else "")
     pnl = equity_now - equity_start
     pnl_pct = (pnl / equity_start * 100) if equity_start else 0.0
     pnl_cls = "up" if pnl >= 0 else "down"
@@ -194,7 +199,7 @@ def generate(journal: Journal, capital: float | None) -> str:
 
     tiles = f"""
     <div class="tiles">
-      <div class="tile"><div class="k">Equity</div>
+      <div class="tile"><div class="k">Valor del satélite</div>
         <div class="v">{_fmt_money(equity_now)}</div>
         <div class="d {pnl_cls}">{'+' if pnl >= 0 else ''}{_fmt_money(pnl)} ({pnl_pct:+.2f}%)</div></div>
       <div class="tile"><div class="k">Ciclos registrados</div>
@@ -213,7 +218,7 @@ def generate(journal: Journal, capital: float | None) -> str:
 <div class="wrap">
   <h1>VelveteenTrade · Track Record</h1>
   <p class="sub">Cada operación del sistema, con su tesis y su evidencia — pérdidas incluidas.
-  Cuenta de práctica (paper trading), capital de trabajo {_fmt_money(capital) if capital else 'n/d'}.
+  Cuenta de práctica (paper trading), capital de trabajo {_fmt_money(capital) if capital else 'n/d'}.{base_note}
   Actualizado {now}.</p>
   {tiles}
   <div class="card"><h2>Curva de equity</h2>{_equity_chart(history)}</div>

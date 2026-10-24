@@ -121,20 +121,28 @@ def _run_cycle(
         journal.reconcile_entries(account.positions,
                                   pending_buys={o.symbol for o in pending if o.side == "buy"})
 
-    # Capital base: if the user's profile states an investment amount, the
-    # engine sizes against THAT, not the (paper) account's full equity — a
-    # $100k demo account trading like a $200 one, which is the point.
+    # Profile: read EVERY cycle (B7 — the bot used to keep the limits it
+    # computed at startup, so a new /start profile never reached the gate).
+    # Its deterministic limits replace config.yaml's.
+    from . import capital as capital_mod
     from . import profile as profile_mod
 
     prof = profile_mod.load(settings.profile_path)
-    if prof and prof.capital:
-        effective_equity = min(account.equity, float(prof.capital))
-        log.info("Capital base from profile: sizing against $%.2f (account equity $%.2f)",
-                 effective_equity, account.equity)
-        account = AccountState(equity=effective_equity, cash=account.cash,
-                               positions=account.positions)
-    peak_equity = journal.update_peak_equity(account.equity)
-    journal.record_equity(account.equity)
+    limits = profile_mod.limits_for(prof) if prof else settings.risk
+
+    # Capital base (B6/B8, see capital.py): size against the satellite the
+    # user allocated (E); track record and drawdown halt read what it is
+    # worth today (V), losses included — a $100k demo account trading like a
+    # $200 one, honestly.
+    base = capital_mod.resolve(journal, prof, account.equity)
+    if base.rebased:
+        log.info("New capital base: satellite $%.2f (core %.0f%%, account $%.2f).",
+                 base.allocated, base.core_weight * 100, account.equity)
+    log.info("Satellite value $%.2f, sizing against $%.2f (account equity $%.2f)",
+             base.value, base.sizing, account.equity)
+    account = AccountState(equity=base.sizing, cash=account.cash, positions=account.positions)
+    peak_equity = journal.update_peak_equity(base.value)
+    journal.record_equity(base.value)
 
     if pending:
         log.warning("Pending orders detected — skipping these symbols this cycle: %s",
@@ -170,7 +178,7 @@ def _run_cycle(
     for s, pos in account.positions.items():
         if s not in prices and pos.qty:
             prices[s] = abs(pos.market_value / pos.qty)
-    ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors)
+    ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors, current_value=base.value)
     ctx.seed(account, pending=pending, prices=prices, booked=booked)
     summary["session"] = session
     summary["turnover_seeded"] = round(ctx.turnover_used, 2)
@@ -181,7 +189,7 @@ def _run_cycle(
     # ------------------------------------------ 2. Deterministic stops FIRST
     entries = journal.entry_prices()
     unchecked: list[str] = []
-    stop_verdicts = risk.check_stops(account, snaps, settings.risk, entries,
+    stop_verdicts = risk.check_stops(account, snaps, limits, entries,
                                      stops=journal.stop_prices(), unchecked=unchecked)
     summary["stops_unchecked"] = unchecked
     for verdict in stop_verdicts:
@@ -271,7 +279,7 @@ def _run_cycle(
                 ))
                 continue
 
-        verdict = risk.evaluate(decision, snap, account, settings.risk, ctx)
+        verdict = risk.evaluate(decision, snap, account, limits, ctx)
         if verdict.symbol != symbol:  # defence in depth: never order what was not judged
             raise RuntimeError(f"risk verdict for {verdict.symbol!r} used for order on {symbol!r}")
         entry = JournalEntry(

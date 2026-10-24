@@ -162,6 +162,18 @@ class Journal:
         )
         self._conn.commit()
 
+    def get_str(self, key: str, default: str | None = None) -> str | None:
+        row = self._conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return str(row[0]) if row else default
+
+    def set_str(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
+
     def record_equity(self, equity: float) -> None:
         """One equity point per cycle — the raw material of the public track record."""
         self._conn.execute(

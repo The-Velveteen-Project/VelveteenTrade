@@ -73,6 +73,7 @@ class CycleContext:
 
     turnover_used: float = 0.0
     peak_equity: float | None = None
+    current_value: float | None = None   # satellite value V for the drawdown halt (B6); None = equity
     sectors: dict[str, str] = field(default_factory=dict)          # symbol -> sector
     sector_notional: dict[str, float] = field(default_factory=dict)  # sector -> $ exposure
     held_notional: dict[str, float] = field(default_factory=dict)    # symbol -> $ exposure (shadow)
@@ -225,7 +226,12 @@ def evaluate(
         )
         return v
 
-    if ctx.peak_equity and equity < ctx.peak_equity * (1 - limits.max_drawdown_halt_pct):
+    if equity <= 0:
+        v.reasons.append("BUY rejected: no capital allocated to the satellite (or it is spent).")
+        return v
+
+    current = ctx.current_value if ctx.current_value is not None else equity
+    if ctx.peak_equity and current < ctx.peak_equity * (1 - limits.max_drawdown_halt_pct):
         v.reasons.append(
             f"BUY rejected: portfolio drawdown beyond {limits.max_drawdown_halt_pct:.0%} — new buys halted."
         )
