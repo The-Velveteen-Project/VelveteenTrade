@@ -31,6 +31,26 @@ from .pipeline import run_cycle
 
 log = logging.getLogger(__name__)
 
+
+def allowed_chat_ids(raw: str | None = None) -> frozenset[int]:
+    """Chat ids allowed to use the bot, from TELEGRAM_ALLOWED_CHAT_IDS
+    (comma-separated). Empty or unset means NOBODY is authorised (fail closed)."""
+    raw = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", "") if raw is None else raw
+    ids: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.add(int(part))
+        except ValueError:
+            log.error("TELEGRAM_ALLOWED_CHAT_IDS: %r is not an integer chat id — ignored", part)
+    return frozenset(ids)
+
+
+def is_authorised(chat_id: int | None, allowed: frozenset[int]) -> bool:
+    return chat_id is not None and chat_id in allowed
+
 AYUDA = (
     "Comandos:\n"
     "/start — entrevista del asesor (crea o rehace tu perfil)\n"
@@ -178,9 +198,24 @@ def run_bot(settings: Settings) -> None:
         if chunk:
             await bot.send_message(chat_id, chunk)
 
+    allowed = allowed_chat_ids()
+    if not allowed:
+        log.warning("TELEGRAM_ALLOWED_CHAT_IDS vacío: el bot no atenderá a nadie. "
+                    "Escríbele y busca tu chat_id en el log para añadirlo.")
+
     def _guarded(handler):
-        """No command may ever fail silently — the error reaches the user."""
+        """Only authorised chats get through; no command may ever fail silently."""
         async def wrapped(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+            chat = update.effective_chat
+            chat_id = chat.id if chat is not None else None
+            if not is_authorised(chat_id, allowed):
+                log.warning("Unauthorised Telegram chat %s tried %s — ignored",
+                            chat_id, handler.__name__)
+                try:
+                    await update.message.reply_text("No autorizado.")
+                except Exception:
+                    pass
+                return
             try:
                 await handler(update, ctx)
             except Exception as exc:  # noqa: BLE001

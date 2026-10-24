@@ -196,7 +196,27 @@ def run_cycle(
         _, fundamental, technical, decision = results[symbol]
         snap = snaps[symbol]
 
+        # B1: the gate must judge exactly the symbol that would be ordered.
+        # A case/whitespace variant of the same ticker is canonicalised; any
+        # other symbol the LLM writes is rejected, never ordered.
+        if decision.symbol != symbol:
+            if decision.symbol.strip().upper() == symbol.upper():
+                decision = decision.model_copy(update={"symbol": symbol})
+            else:
+                reason = (f"symbol mismatch: decision names {decision.symbol!r}, "
+                          f"pipeline is on {symbol!r} — rejected")
+                log.warning("%s", reason)
+                summary["analyzed"].append(symbol)
+                summary["rejected"].append(f"{symbol}: {reason}")
+                journal.record(JournalEntry(
+                    symbol=symbol, fundamental_report=fundamental,
+                    technical_report=technical, decision=decision, note=reason,
+                ))
+                continue
+
         verdict = risk.evaluate(decision, snap, account, settings.risk, ctx)
+        if verdict.symbol != symbol:  # defence in depth: never order what was not judged
+            raise RuntimeError(f"risk verdict for {verdict.symbol!r} used for order on {symbol!r}")
         entry = JournalEntry(
             symbol=symbol, fundamental_report=fundamental, technical_report=technical,
             decision=decision, verdict=verdict,
