@@ -190,6 +190,7 @@ def _run_cycle(
                         verdict.symbol)
             continue
         order_id = broker.submit_order(verdict.symbol, verdict.qty, "sell")
+        ctx.mark_traded(verdict.symbol)
         if broker.sends_orders:
             journal.book_turnover(session, order_id,
                                   verdict.qty * prices.get(verdict.symbol, float("inf")))
@@ -201,8 +202,10 @@ def _run_cycle(
     # ------------------------------------------------ 3. Candidate selection
     held_symbols = [s for s in account.positions if s in snaps and s not in summary["stops"]]
     screened = indicators.screen(list(snaps.values()), settings.candidates_per_cycle)
+    # B5: a symbol stopped out this cycle must not come back through the
+    # screen — it has a sell in flight; any further order would be a second one.
     candidates = [s for s in dict.fromkeys(held_symbols + [s.symbol for s in screened])
-                  if s not in pending_symbols]
+                  if s not in pending_symbols and s not in summary["stops"]]
 
     # --------------------------------------- 4. Analysis (parallel, LLM-bound)
     # SQLite (journal, RAG) is main-thread only — prefetch lessons and canon

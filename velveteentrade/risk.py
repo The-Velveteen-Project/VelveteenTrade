@@ -80,6 +80,7 @@ class CycleContext:
     seeded: bool = False
     notes: list[str] = field(default_factory=list)
     unvalued: list[str] = field(default_factory=list)       # symbols we could not value
+    traded: set[str] = field(default_factory=set)            # symbols with an order this cycle
 
     def sector_of(self, symbol: str) -> str:
         # Unknown sectors are per-symbol buckets, never lumped into a fake sector.
@@ -142,9 +143,14 @@ class CycleContext:
     def n_positions(self) -> int:
         return len(self.held_notional)
 
+    def mark_traded(self, symbol: str) -> None:
+        """Record an order sent OUTSIDE evaluate() this cycle (the stop sweep)."""
+        self.traded.add(symbol)
+
     def _apply_buy(self, symbol: str, notional: float) -> None:
         self._add_exposure(symbol, notional)
         self.turnover_used += notional
+        self.traded.add(symbol)
 
     def _apply_sell(self, symbol: str, traded_notional: float) -> None:
         exposure = self.held_notional.pop(symbol, 0.0)
@@ -152,6 +158,7 @@ class CycleContext:
         self.gross = max(0.0, self.gross - exposure)
         self.sector_notional[sector] = max(0.0, self.sector_notional.get(sector, 0.0) - exposure)
         self.turnover_used += traded_notional
+        self.traded.add(symbol)
 
 
 def evaluate(
@@ -169,6 +176,16 @@ def evaluate(
     # ---------------------------------------------------------------- HOLD
     if decision.action == "HOLD":
         v.reasons.append("HOLD — no order.")
+        return v
+
+    # ------------------------------- B5/D3: one order per symbol per cycle
+    # The shadow models each symbol's position as ONE quantity; a second order
+    # on the same symbol in the same cycle (a SELL after the stop sweep already
+    # sold it, or BUY-then-SELL) makes shadow and account diverge: a double
+    # sale, or a sale that "closes" exposure the account still holds.
+    if decision.symbol in ctx.traded:
+        v.reasons.append(f"Rejected: {decision.symbol} already has an order this cycle "
+                         "(stop sweep or an earlier decision) — one order per symbol per cycle.")
         return v
 
     # ------------------------------------------- B3: fail closed on NaN/inf

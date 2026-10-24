@@ -459,8 +459,25 @@ def test_repro_B5_stop_then_llm_sell_double_sells(tmp_path, monkeypatch):
     llm = ScriptedLLM(lambda x: dict(action="SELL", conviction=3))
     run_cycle(s, broker, llm, monkeypatch, {"X": snap("X", close=95.0, mom=0.30)}, journal=j)
     sold = sum(q for sym, q, sd in broker.orders if sym == "X" and sd == "sell")
-    assert broker.orders == [("X", 50, "sell"), ("X", 50, "sell")]
-    assert sold == 100 > 50                                           # corto de 50 si ambas se llenan
+    # Regresión B5 (24 oct). Antes: [("X", 50, "sell"), ("X", 50, "sell")], 100
+    # vendidas teniendo 50. El símbolo detenido ya no vuelve por el screen.
+    assert broker.orders == [("X", 50, "sell")]
+    assert sold == 50
+
+
+def test_B5_gate_refuses_second_order_on_a_stopped_symbol():
+    """Defensa en profundidad: aunque el símbolo llegara a la puerta, la puerta
+    sabe que el barrido ya lo vendió este ciclo."""
+    acct = MockBroker(equity=EQ).state
+    acct.positions = {"X": Position("X", 50, 100.0, 4_750.0)}
+    ctx = risk.CycleContext(peak_equity=EQ)
+    ctx.seed(acct)
+    ctx.mark_traded("X")                                              # lo hizo el barrido
+    for action in ("SELL", "BUY"):
+        v = risk.evaluate(ExecutiveDecision(symbol="X", action=action, conviction=5, thesis="t",
+                                            invalidation="i", horizon_days=10),
+                          snap("X", close=95.0), acct, RiskLimits(), ctx)
+        assert not v.approved and "one order per symbol" in v.reasons[-1]
 
 
 # ======================================================================
@@ -557,13 +574,16 @@ def test_repro_D3_shadow_diverges_from_real_portfolio_at_gate_level():
             real[sym] = real.get(sym, 0.0) + (v.qty if action == "BUY" else -v.qty)
         return v
 
-    go("X", "BUY"); go("X", "SELL")
+    assert go("X", "BUY").approved
+    assert not go("X", "SELL").approved            # Regresión D3 (24 oct): una orden por símbolo y ciclo
     for sym in "ABCDE":
         go(sym, "BUY")
     real_gross = sum(q * 100.0 for q in real.values()) / EQ
-    assert ctx.gross / EQ <= 0.30 + 1e-12          # la sombra respeta el tope...
-    assert real_gross > 0.30                        # ...la cuenta real no
-    assert real["X"] == 90.0
+    # Antes: sombra <= 30 % y cuenta real 39 % (X conservaba 90 acciones).
+    # Ahora la SELL se rechaza, la sombra no "cierra" lo que la cuenta tiene,
+    # y las dos coinciden (es la hipótesis Nodup de la propuesta P2).
+    assert ctx.gross / EQ <= 0.30 + 1e-12
+    assert abs(real_gross - ctx.gross / EQ) < 1e-9 and real_gross <= 0.30 + 1e-12
 
 
 # ======================================================================
