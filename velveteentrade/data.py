@@ -37,13 +37,20 @@ class MarketData:
         return df
 
     def _fetch_alpaca(self, symbol: str, days: int) -> pd.DataFrame:
+        from alpaca.data.enums import Adjustment
         from alpaca.data.historical import StockHistoricalDataClient
         from alpaca.data.requests import StockBarsRequest
         from alpaca.data.timeframe import TimeFrame
 
         client = StockHistoricalDataClient(self._key, self._secret)
         start = datetime.now(timezone.utc) - timedelta(days=int(days * 1.6))
-        req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start)
+        # R30: Alpaca returns RAW bars by default. A split then looks like a
+        # -50%/-90% crash: momentum collapses for 63 days and the 20d CVaR of
+        # the window (~-90%) vetoes the symbol for ~300 days (seen in the cache:
+        # NFLX 10:1 on 2025-11-17, XLE and XLK 2:1 on 2025-12-05). ALL adjusts
+        # history for splits and dividends; the latest bar is the real price.
+        req = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start,
+                               adjustment=Adjustment.ALL)
         bars = client.get_stock_bars(req).df
         if bars.empty:
             raise ValueError(f"No bars returned for {symbol}")
