@@ -7,7 +7,7 @@ Formal model and proofs: `verification/lean/` (see `verification/README.md`).
 The invariants proved there, stated informally:
 
   (G1) An approved BUY never pushes the symbol, its sector, the portfolio's
-       gross exposure, the position count, or the cycle's turnover above
+       gross exposure, the position count, or the session's turnover above
        their caps.
   (G2) An approved BUY risks at most equity * per_trade_risk_pct * conviction/5
        between the reference price and its (frozen) stop.
@@ -19,6 +19,15 @@ The invariants proved there, stated informally:
 account snapshot does not change while a cycle runs, so checking caps against
 it lets several individually-valid BUYs jointly break them (the bug fixed in
 Oct 2026: 9 positions / 105.8% gross with caps 8 / 100%).
+
+The same failure exists BETWEEN cycles (B2, fixed 24 Oct 2026): the snapshot
+shows only FILLED positions, so orders still queued from an earlier cycle —
+market closed, several /ciclo the same evening — were invisible and every new
+cycle got the full budget again (12 positions / 120% gross / 120% turnover
+with caps 8 / 100% / 25%). The shadow is therefore seeded with pending orders
+as well, and turnover is a per-SESSION ledger, not a per-cycle counter. This is
+model P3 in `verification/`: each cycle must start from the previous one's
+shadow, not from the broker's photograph alone.
 """
 from __future__ import annotations
 
@@ -26,7 +35,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 
-from .broker import AccountState
+from .broker import AccountState, OpenOrder
 from .config import RiskLimits
 from .schemas import ExecutiveDecision, RiskVerdict, TechnicalSnapshot
 
@@ -64,21 +73,57 @@ class CycleContext:
     gross: float = 0.0                                                # sum of |exposure| (shadow)
     seeded: bool = False
     notes: list[str] = field(default_factory=list)
+    pending_unpriced: list[str] = field(default_factory=list)       # symbols we could not value
 
     def sector_of(self, symbol: str) -> str:
         # Unknown sectors are per-symbol buckets, never lumped into a fake sector.
         return self.sectors.get(symbol, f"UNKNOWN:{symbol}")
 
-    def seed(self, account: AccountState) -> None:
-        """Initialize the shadow portfolio and sector exposure from the broker. Idempotent."""
+    def _add_exposure(self, symbol: str, notional: float) -> None:
+        self.held_notional[symbol] = self.held_notional.get(symbol, 0.0) + notional
+        self.gross += notional
+        sector = self.sector_of(symbol)
+        self.sector_notional[sector] = self.sector_notional.get(sector, 0.0) + notional
+
+    def seed(self, account: AccountState, pending: list[OpenOrder] | tuple = (),
+             prices: dict[str, float] | None = None,
+             booked: dict[str, float] | None = None) -> None:
+        """Initialize the shadow from the broker. Idempotent.
+
+        - Filled positions at market value (as before).
+        - PENDING orders (B2): a pending BUY is exposure already committed — it
+          adds `remaining qty x reference price` to the symbol, its sector and
+          gross, and takes a position slot if the symbol is new. A pending SELL
+          does NOT reduce exposure (it may never fill): conservative.
+        - Turnover starts from what this session has already spent: `booked`
+          (order id -> notional, from the journal's ledger) plus every pending
+          order the ledger does not know, each counted once.
+        - A pending order that cannot be valued (no finite positive price) is
+          recorded in `pending_unpriced`, and evaluate() then halts new buys:
+          if we cannot price what is committed, we do not add to it.
+        """
         if self.seeded:
             return
+        prices = prices or {}
+        booked = booked or {}
         for sym, pos in account.positions.items():
-            mv = abs(pos.market_value)
-            self.held_notional[sym] = self.held_notional.get(sym, 0.0) + mv
-            self.gross += mv
-            sector = self.sector_of(sym)
-            self.sector_notional[sector] = self.sector_notional.get(sector, 0.0) + mv
+            self._add_exposure(sym, abs(pos.market_value))
+        self.turnover_used += sum(abs(n) for n in booked.values())
+        for o in pending:
+            px = prices.get(o.symbol)
+            if o.remaining_qty > 0:
+                if px is None or not math.isfinite(px) or px <= 0:
+                    self.pending_unpriced.append(o.symbol)
+                    continue
+                value = o.remaining_qty * px
+            elif o.notional:
+                value = abs(o.notional)     # dollar order: conservative, ignores partial fills
+            else:
+                continue                    # fully filled: already in positions
+            if o.side == "buy":
+                self._add_exposure(o.symbol, value)
+            if o.id not in booked:
+                self.turnover_used += value
         self.seeded = True
 
     # Backwards-compatible name used by older callers/tests.
@@ -89,10 +134,7 @@ class CycleContext:
         return len(self.held_notional)
 
     def _apply_buy(self, symbol: str, notional: float) -> None:
-        sector = self.sector_of(symbol)
-        self.held_notional[symbol] = self.held_notional.get(symbol, 0.0) + notional
-        self.gross += notional
-        self.sector_notional[sector] = self.sector_notional.get(sector, 0.0) + notional
+        self._add_exposure(symbol, notional)
         self.turnover_used += notional
 
     def _apply_sell(self, symbol: str, traded_notional: float) -> None:
@@ -134,6 +176,13 @@ def evaluate(
         return v
 
     # ----------------------------------------------------------------- BUY
+    if ctx.pending_unpriced:
+        v.reasons.append(
+            "BUY rejected: pending orders on "
+            f"{sorted(set(ctx.pending_unpriced))} could not be valued — new buys halted this cycle."
+        )
+        return v
+
     if decision.conviction < limits.min_conviction:
         v.reasons.append(
             f"BUY rejected: conviction {decision.conviction} < minimum {limits.min_conviction}."
@@ -251,7 +300,7 @@ def _turnover_exceeded(notional: float, equity: float, limits: RiskLimits,
                        ctx: CycleContext, v: RiskVerdict) -> bool:
     if ctx.turnover_used + notional > equity * limits.max_daily_turnover_pct:
         v.reasons.append(
-            f"Rejected: cycle turnover budget exhausted "
+            f"Rejected: session turnover budget exhausted "
             f"({limits.max_daily_turnover_pct:.0%} of equity)."
         )
         return True

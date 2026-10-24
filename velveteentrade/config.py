@@ -26,7 +26,7 @@ class RiskLimits:
     max_gross_exposure: float = 1.0       # 1.0 = no leverage, ever
     per_trade_risk_pct: float = 0.01      # equity fraction at risk per trade (ATR stop distance)
     stop_atr_mult: float = 2.0
-    max_daily_turnover_pct: float = 0.25  # max fraction of equity traded per cycle
+    max_daily_turnover_pct: float = 0.25  # max fraction of equity traded per trading SESSION (all cycles; B2)
     max_drawdown_halt_pct: float = 0.10   # halt new BUYs beyond this peak-to-trough drawdown
     min_conviction: int = 3               # decisions below this are logged, not traded
     max_cvar_95_20d: float = -0.25        # reject symbols whose empirical 20d CVaR is worse than this

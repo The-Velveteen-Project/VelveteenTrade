@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import date
 from fractions import Fraction
 
 import numpy as np
@@ -180,9 +181,100 @@ def test_repro_B2_pending_orders_stack_across_cycles(tmp_path, monkeypatch):
         _, j = run_cycle(s, broker, buy_all(), monkeypatch, snaps, journal=j)
     gross = notional_of(broker.orders, px) / EQ
     n_pos = len({o[0] for o in broker.orders})
-    assert gross == 1.2 and gross > RiskLimits().max_gross_exposure          # 120 % > 100 %
-    assert n_pos == 12 and n_pos > RiskLimits().max_positions               # 12 > 8
-    assert gross > RiskLimits().max_daily_turnover_pct                      # mismo día: 120 % > 25 %
+    # Regresión B2 (24 oct): antes 12 posiciones al 120 % (bruto y turnover).
+    # Las pendientes entran en la sombra y el turnover es por sesión: el
+    # primer ciclo gasta el presupuesto del día y los cinco siguientes no compran.
+    assert gross <= RiskLimits().max_gross_exposure
+    assert n_pos <= RiskLimits().max_positions
+    assert gross <= RiskLimits().max_daily_turnover_pct
+    assert [o[0] for o in broker.orders] == ["S0", "S1"] and gross == 0.2
+
+
+def test_B2_pending_exposure_binds_caps_without_turnover_help(tmp_path, monkeypatch):
+    """La siembra con pendientes, sola: con el turnover desactivado (200 %), el
+    tope de posiciones debe seguir valiendo entre ciclos con el mercado cerrado."""
+    syms = [f"S{i}" for i in range(12)]
+    snaps = {s: snap(s, mom=0.5 - i / 100) for i, s in enumerate(syms)}
+    px = {s: 100.0 for s in syms}
+    L = RiskLimits(max_daily_turnover_pct=2.0, max_sector_exposure_pct=1.0)
+    s = make_settings(tmp_path, "x", syms, limits=L)
+    broker = AfterHoursBroker(equity=EQ)
+    j = None
+    for _ in range(6):
+        _, j = run_cycle(s, broker, buy_all(), monkeypatch, snaps, journal=j)
+    n_pos = len({o[0] for o in broker.orders})
+    gross = notional_of(broker.orders, px) / EQ
+    assert n_pos == L.max_positions == 8                     # antes: 12
+    assert gross <= L.max_gross_exposure
+
+
+def test_B2_seed_counts_pending_orders_once():
+    acct = MockBroker(equity=EQ).state
+    acct.positions = {"A": Position("A", 100, 100.0, 10_000.0)}
+    pending = [
+        OpenOrder(id="b", symbol="B", qty=50, side="buy"),                  # nueva: 5 000
+        OpenOrder(id="s", symbol="A", qty=100, side="sell"),                # no resta exposición
+        OpenOrder(id="p", symbol="A", qty=100, side="buy", filled_qty=60),  # solo lo que falta: 4 000
+        OpenOrder(id="n", symbol="C", qty=0, side="buy", notional=2_500.0),  # orden en dólares
+        OpenOrder(id="f", symbol="D", qty=10, side="buy", filled_qty=10),   # llena: ya está en positions
+    ]
+    prices = {"A": 100.0, "B": 100.0, "C": 50.0, "D": 10.0}
+    ctx = risk.CycleContext(peak_equity=EQ)
+    ctx.seed(acct, pending=pending, prices=prices, booked={"b": 5_000.0, "old": 1_000.0})
+    assert ctx.held_notional == {"A": 14_000.0, "B": 5_000.0, "C": 2_500.0}
+    assert ctx.gross == 21_500.0 and ctx.n_positions == 3
+    # turnover: lo reservado (5 000 + 1 000) + pendientes que el libro no conoce
+    # (venta 10 000 + parcial 4 000 + dólares 2 500); "b" no se cuenta dos veces.
+    assert ctx.turnover_used == 6_000.0 + 10_000.0 + 4_000.0 + 2_500.0
+    assert ctx.pending_unpriced == []
+
+
+def test_B2_unpriced_pending_order_halts_buys_not_sells():
+    acct = MockBroker(equity=EQ).state
+    acct.positions = {"A": Position("A", 10, 100.0, 1_000.0)}
+    ctx = risk.CycleContext(peak_equity=EQ)
+    ctx.seed(acct, pending=[OpenOrder(id="z", symbol="Z", qty=5, side="buy")],
+             prices={"A": 100.0, "Z": float("nan")})
+    assert ctx.pending_unpriced == ["Z"]
+    dec = lambda sym, act: ExecutiveDecision(symbol=sym, action=act, conviction=5, thesis="t",
+                                             invalidation="i", horizon_days=10)
+    v = risk.evaluate(dec("X", "BUY"), snap("X"), acct, RiskLimits(), ctx)
+    assert not v.approved and "could not be valued" in v.reasons[-1]
+    assert risk.evaluate(dec("A", "SELL"), snap("A"), acct, RiskLimits(), ctx).approved
+
+
+def test_B2_turnover_is_per_session_across_open_market_cycles(tmp_path, monkeypatch):
+    """Mercado abierto (las órdenes se llenan): dos ciclos en la misma sesión
+    comparten el presupuesto; la sesión siguiente lo renueva."""
+    syms = [f"S{i}" for i in range(8)]
+    snaps = {x: snap(x, mom=0.5 - i / 100) for i, x in enumerate(syms)}
+    s = make_settings(tmp_path, "x", syms)
+    broker = FillingBroker(EQ, {x: 100.0 for x in syms})
+    broker.session = date(2026, 10, 26)
+    _, j = run_cycle(s, broker, buy_all(), monkeypatch, snaps)
+    assert len(broker.orders) == 2                                    # 20 % de 25 %
+    run_cycle(s, broker, buy_all(), monkeypatch, snaps, journal=j)
+    assert len(broker.orders) == 2                                    # misma sesión: nada
+    assert sum(j.booked_turnover("2026-10-26").values()) == 20_000.0
+    broker.session = date(2026, 10, 27)
+    run_cycle(s, broker, buy_all(), monkeypatch, snaps, journal=j)
+    assert len(broker.orders) == 4                                    # sesión nueva
+
+
+def test_B2_dry_run_does_not_book_real_turnover(tmp_path, monkeypatch):
+    from velveteentrade.broker import DryRunBroker
+    syms = ["S0", "S1"]
+    s = make_settings(tmp_path, "x", syms)
+    inner = MockBroker(equity=EQ); inner.session = date(2026, 10, 26)
+    dry = DryRunBroker(inner)
+    _, j = run_cycle(s, dry, buy_all(), monkeypatch, {x: snap(x) for x in syms})
+    assert dry.intended_orders and j.booked_turnover("2026-10-26") == {}
+
+
+def test_B2_non_finite_turnover_is_booked_as_infinite(tmp_path):
+    j = Journal(tmp_path / "j.db")
+    j.book_turnover("2026-10-26", "x", float("nan"))
+    assert j.booked_turnover("2026-10-26") == {"x": math.inf}
 
 
 # ======================================================================
@@ -337,7 +429,10 @@ def test_repro_B8_satellite_exceeds_core_satellite_split(tmp_path, monkeypatch):
     snaps = {x: snap(x, close=50.0, atr=0.5, mom=0.5 - i / 100) for i, x in enumerate(syms)}
     broker = FillingBroker(EQ, px)
     j = None
-    for _ in range(6):                                                # seis días, órdenes llenas
+    for day in range(6):                                              # seis días, órdenes llenas
+        # Una sesión distinta por ciclo: desde B2 el turnover es por sesión, y
+        # seis ciclos en la MISMA sesión ya no apilan compras (eso era B2).
+        broker.session = date(2026, 10, 19 + day)
         _, j = run_cycle(s, broker, buy_all(), monkeypatch, snaps, journal=j)
     gross = sum(p.market_value for p in broker.state.positions.values()) / 10_000.0
     assert satellite == 0.40 and gross > satellite                   # 0.64 > 0.40

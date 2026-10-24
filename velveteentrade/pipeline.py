@@ -127,8 +127,23 @@ def run_cycle(
     # every approved order updates, so caps hold across the whole cycle, not
     # just per decision. Stopped-out positions stay counted until the next
     # cycle's broker snapshot — conservative, since their sells may not fill.
+    #
+    # B2: the shadow must also start from what EARLIER cycles committed and
+    # the snapshot does not show — pending orders (valued at the last close)
+    # and the turnover already booked for the session they execute in.
+    session = broker.session_date().isoformat()
+    booked = journal.booked_turnover(session)
+    prices = {s: sn.close for s, sn in snaps.items()}
+    for s, pos in account.positions.items():
+        if s not in prices and pos.qty:
+            prices[s] = abs(pos.market_value / pos.qty)
     ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors)
-    ctx.seed(account)
+    ctx.seed(account, pending=pending, prices=prices, booked=booked)
+    summary["session"] = session
+    summary["turnover_seeded"] = round(ctx.turnover_used, 2)
+    if ctx.pending_unpriced:
+        log.warning("Pending orders that cannot be valued: %s — new buys halted this cycle.",
+                    sorted(set(ctx.pending_unpriced)))
 
     # ------------------------------------------ 2. Deterministic stops FIRST
     entries = journal.entry_prices()
@@ -139,6 +154,8 @@ def run_cycle(
                         verdict.symbol)
             continue
         order_id = broker.submit_order(verdict.symbol, verdict.qty, "sell")
+        if broker.sends_orders:
+            journal.book_turnover(session, order_id, verdict.qty * snaps[verdict.symbol].close)
         journal.clear_entry(verdict.symbol)
         journal.record(JournalEntry(symbol=verdict.symbol, verdict=verdict, executed=True,
                                     note=f"stop-loss order {order_id}"))
@@ -226,6 +243,8 @@ def run_cycle(
         if verdict.approved:
             side = "buy" if verdict.action == "BUY" else "sell"
             order_id = broker.submit_order(symbol, verdict.qty, side)
+            if broker.sends_orders:
+                journal.book_turnover(session, order_id, verdict.qty * snap.close)
             entry.executed = True
             entry.note = f"order {order_id}"
             if side == "buy":

@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .schemas import JournalEntry
+
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS journal (
@@ -38,6 +42,12 @@ CREATE TABLE IF NOT EXISTS kv (
 CREATE TABLE IF NOT EXISTS equity_history (
     ts TEXT PRIMARY KEY,
     equity REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS turnover (
+    session TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    notional REAL NOT NULL,
+    PRIMARY KEY (session, order_id)
 );
 """
 
@@ -101,6 +111,34 @@ class Journal:
                 "SELECT lesson FROM lessons ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [r[0] for r in rows]
+
+    # ------------------------------------------------------------- turnover
+    def book_turnover(self, session: str, order_id: str, notional: float) -> None:
+        """Book an order's notional against the trading SESSION it executes in.
+
+        Keyed by order id so a cycle can tell its own booked orders from
+        pending orders it has never seen (placed by hand, or before this
+        ledger existed) and count each exactly once.
+
+        A non-finite notional (e.g. a NaN price) is booked as +inf: an
+        unknown spend must exhaust the session budget, never vanish from it
+        (SQLite would store NaN as NULL)."""
+        notional = abs(float(notional))
+        if not math.isfinite(notional):
+            log.error("Turnover for order %s is not finite (%r) — booking +inf: no more "
+                      "turnover this session.", order_id, notional)
+            notional = math.inf
+        self._conn.execute(
+            "INSERT OR REPLACE INTO turnover (session, order_id, notional) VALUES (?, ?, ?)",
+            (session, str(order_id), notional),
+        )
+        self._conn.commit()
+
+    def booked_turnover(self, session: str) -> dict[str, float]:
+        rows = self._conn.execute(
+            "SELECT order_id, notional FROM turnover WHERE session = ?", (session,)
+        ).fetchall()
+        return {oid: n for oid, n in rows}
 
     # ------------------------------------------------------------------- kv
     def get_float(self, key: str, default: float | None = None) -> float | None:

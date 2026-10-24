@@ -6,6 +6,7 @@ pandas>=2.2
 numpy>=1.26
 PyYAML>=6.0
 python-dotenv>=1.0
+tzdata>=2024.1          # zoneinfo on slim images (session date in New York)
 yfinance>=0.2.40
 pypdf>=4.0
 python-telegram-bot[job-queue]>=21.0
