@@ -271,6 +271,23 @@ def test_B2_dry_run_does_not_book_real_turnover(tmp_path, monkeypatch):
     assert dry.intended_orders and j.booked_turnover("2026-10-26") == {}
 
 
+def test_R2b_second_concurrent_cycle_is_refused(tmp_path, monkeypatch):
+    s = make_settings(tmp_path, "x", ["S0"])
+    broker = MockBroker(equity=EQ)
+    assert pipeline._CYCLE_LOCK.acquire(blocking=False)      # «otro ciclo» en curso
+    try:
+        try:
+            run_cycle(s, broker, buy_all(), monkeypatch, {"S0": snap("S0")})
+            refused = False
+        except pipeline.CycleInProgress:
+            refused = True
+        assert refused and broker.orders == []
+    finally:
+        pipeline._CYCLE_LOCK.release()
+    _, j = run_cycle(s, broker, buy_all(), monkeypatch, {"S0": snap("S0")})
+    assert broker.orders and not pipeline._CYCLE_LOCK.locked()   # liberado al terminar
+
+
 def test_B2_non_finite_turnover_is_booked_as_infinite(tmp_path):
     j = Journal(tmp_path / "j.db")
     j.book_turnover("2026-10-26", "x", float("nan"))

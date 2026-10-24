@@ -7,6 +7,7 @@ sequentially, in screen-rank order, so budgets are deterministic.
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from . import agents, indicators, risk
@@ -20,6 +21,15 @@ from .schemas import AnalystReport, ExecutiveDecision, JournalEntry, TechnicalSn
 log = logging.getLogger(__name__)
 
 MAX_WORKERS = 4
+
+# R2b: the bot runs /ciclo and the 21:30 job in worker threads of ONE process.
+# Two cycles at once would both seed from the same broker photograph and
+# each see at most part of the other's orders. One cycle at a time.
+_CYCLE_LOCK = threading.Lock()
+
+
+class CycleInProgress(RuntimeError):
+    """Raised instead of starting a cycle while another one is running."""
 
 
 def _canon_queries(snap: TechnicalSnapshot, sector: str | None) -> dict[str, str]:
@@ -75,7 +85,26 @@ def run_cycle(
     llm: StructuredLLM,
     journal: Journal,
 ) -> dict:
-    """One full decision cycle. Returns a summary dict for logging/notification."""
+    """One full decision cycle. Returns a summary dict for logging/notification.
+
+    Never runs concurrently with another cycle in this process: a second call
+    while one is running raises CycleInProgress immediately (it does not wait
+    and then trade on a stale view)."""
+    if not _CYCLE_LOCK.acquire(blocking=False):
+        raise CycleInProgress("Another trading cycle is already running.")
+    try:
+        return _run_cycle(settings, broker, data, llm, journal)
+    finally:
+        _CYCLE_LOCK.release()
+
+
+def _run_cycle(
+    settings: Settings,
+    broker: BrokerAdapter,
+    data: MarketData,
+    llm: StructuredLLM,
+    journal: Journal,
+) -> dict:
     account = broker.account()
 
     # ------------------------------------------- 0. Reconcile with the broker

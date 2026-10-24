@@ -27,7 +27,7 @@ from .config import Settings
 from .data import MarketData
 from .llm import StructuredLLM
 from .memory import Journal
-from .pipeline import run_cycle
+from .pipeline import CycleInProgress, run_cycle
 
 log = logging.getLogger(__name__)
 
@@ -363,6 +363,9 @@ def run_bot(settings: Settings) -> None:
             summary = await asyncio.to_thread(_cycle_in_thread)
             await _send_long(ctx.bot, update.effective_chat.id,
                              format_cycle_summary(summary, journal))
+        except CycleInProgress:
+            await update.message.reply_text(
+                "Ya hay un ciclo corriendo; no arranco otro. Espera a que termine.")
         except Exception as exc:  # noqa: BLE001
             log.exception("Cycle failed")
             await update.message.reply_text(f"El ciclo falló: {exc}")
@@ -391,6 +394,8 @@ def run_bot(settings: Settings) -> None:
                 await ctx.bot.send_message(int(chat_id),
                                            "📊 Ciclo diario automático\n\n"
                                            + format_cycle_summary(summary, journal))
+        except CycleInProgress:
+            log.warning("Scheduled cycle skipped: another cycle is already running.")
         except Exception as exc:  # noqa: BLE001
             log.exception("Scheduled cycle failed")
             if chat_id:
