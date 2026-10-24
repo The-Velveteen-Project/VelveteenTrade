@@ -405,13 +405,46 @@ def test_repro_B4_add_on_buy_overwrites_frozen_stop(tmp_path, monkeypatch):
     broker.state.positions = {"X": Position("X", 100, 100.0, 9_700.0)}
     run_cycle(s, broker, buy_all(), monkeypatch, {"X": snap("X", close=97.0, atr=6.0)}, journal=j)
     assert broker.orders[-1][2] == "buy"                              # compra adicional pequeña
-    assert j.stop_prices() == {"X": 85.0}                             # 96 -> 85
-    lot1_loss_at_stop = 100 * (100.0 - 85.0)
-    assert lot1_loss_at_stop == 1_500.0 > budget                      # G2 roto para el lote 1
-    held = {"X": Position("X", 103.092, 100.0, 103.092 * 86.0)}
+    add_qty = broker.orders[-1][1]
+    # Regresión B4 (24 oct). Antes: el stop bajaba 96 -> 85 y el lote 1 perdía
+    # 1 500 con presupuesto de 1 000; a 86 el stop no saltaba.
+    assert j.stop_prices() == {"X": 96.0}                             # se aprieta, nunca se afloja
+    assert 100 * (100.0 - 96.0) <= budget                             # lote 1: 400 <= 1 000
+    assert add_qty * (97.0 - 96.0) <= budget                          # lote 2, con su propio presupuesto
+    held = {"X": Position("X", 100 + add_qty, 100.0, (100 + add_qty) * 86.0)}
     acct = broker.state; acct.positions = held
-    assert risk.check_stops(acct, {"X": snap("X", close=86.0, atr=6.0)}, RiskLimits(),
-                            j.entry_prices(), stops=j.stop_prices()) == []   # a 86 no salta
+    v = risk.check_stops(acct, {"X": snap("X", close=86.0, atr=6.0)}, RiskLimits(),
+                         j.entry_prices(), stops=j.stop_prices())
+    assert [(x.symbol, x.qty) for x in v] == [("X", 100 + add_qty)]    # a 86 SÍ salta
+
+
+def test_B4_set_stop_is_tighten_only(tmp_path):
+    j = Journal(tmp_path / "j.db")
+    assert j.set_stop("X", 96.0) == 96.0
+    assert j.set_stop("X", 85.0) == 96.0                              # no se afloja
+    assert j.set_stop("X", 98.5) == 98.5                              # sí se aprieta
+    assert j.stop_prices() == {"X": 98.5}
+
+
+def test_B4_orphan_stop_cleared_unless_a_buy_is_queued(tmp_path):
+    j = Journal(tmp_path / "j.db")
+    j.set_stop("GONE", 96.0)       # posición cerrada a mano: su stop quedaría huérfano
+    j.set_stop("QUEUED", 50.0)     # compra en cola, aún no es posición
+    j.set_stop("HELD", 10.0)
+    j.reconcile_entries({"HELD": Position("HELD", 1, 11.0, 11.0)}, pending_buys={"QUEUED"})
+    assert j.stop_prices() == {"QUEUED": 50.0, "HELD": 10.0}
+
+
+def test_B4_dry_run_never_touches_real_stops(tmp_path, monkeypatch):
+    from velveteentrade.broker import DryRunBroker
+    s = make_settings(tmp_path, "x", ["X", "Y"])
+    j = Journal(s.db_path); j.set_stop("X", 90.0)
+    inner = MockBroker(equity=EQ)
+    inner.state.positions = {"X": Position("X", 10, 100.0, 1_000.0)}
+    llm = ScriptedLLM(lambda x: dict(action="SELL" if x == "X" else "BUY", conviction=5))
+    run_cycle(s, DryRunBroker(inner), llm, monkeypatch,
+              {"X": snap("X"), "Y": snap("Y")}, journal=j)
+    assert j.stop_prices() == {"X": 90.0}          # ni el SELL de X lo borra ni el BUY de Y crea uno
 
 
 # ======================================================================
