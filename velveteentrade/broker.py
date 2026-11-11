@@ -9,8 +9,12 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger(__name__)
+
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -34,9 +38,19 @@ class OpenOrder:
     symbol: str
     qty: float
     side: str  # 'buy' | 'sell'
+    filled_qty: float = 0.0          # partial fills already show up in positions
+    notional: float | None = None    # dollar-sized orders (qty unknown until filled)
+
+    @property
+    def remaining_qty(self) -> float:
+        return max(0.0, self.qty - self.filled_qty)
 
 
 class BrokerAdapter(ABC):
+    #: False for adapters that only pretend to send (DryRunBroker): their
+    #: orders must not be booked against the real session's turnover.
+    sends_orders: bool = True
+
     @abstractmethod
     def account(self) -> AccountState: ...
 
@@ -54,6 +68,14 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def market_open_soon(self) -> bool:
         """True if the market is open or opens within the next session."""
+
+    def session_date(self) -> date:
+        """The trading session in which an order submitted NOW would execute.
+
+        The daily turnover budget is keyed by this date: an order queued at
+        21:30 UTC on Monday executes — and spends turnover — on Tuesday.
+        Default: today in New York (brokers override with their clock)."""
+        return datetime.now(NEW_YORK).date()
 
 
 class AlpacaBroker(BrokerAdapter):
@@ -97,7 +119,9 @@ class AlpacaBroker(BrokerAdapter):
         orders = self._client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
         return [
             OpenOrder(id=str(o.id), symbol=o.symbol, qty=float(o.qty or 0),
-                      side=str(o.side.value if hasattr(o.side, "value") else o.side).lower())
+                      side=str(o.side.value if hasattr(o.side, "value") else o.side).lower(),
+                      filled_qty=float(getattr(o, "filled_qty", None) or 0),
+                      notional=float(o.notional) if getattr(o, "notional", None) else None)
             for o in orders
         ]
 
@@ -109,9 +133,16 @@ class AlpacaBroker(BrokerAdapter):
         clock = self._client.get_clock()
         return bool(clock.is_open) or clock.next_open is not None
 
+    def session_date(self) -> date:
+        clock = self._client.get_clock()
+        ts = clock.timestamp if clock.is_open else clock.next_open
+        return ts.astimezone(NEW_YORK).date()
+
 
 class DryRunBroker(BrokerAdapter):
     """Wraps a real (or mock) account snapshot but never sends orders."""
+
+    sends_orders = False
 
     def __init__(self, inner: BrokerAdapter) -> None:
         self._inner = inner
@@ -134,6 +165,9 @@ class DryRunBroker(BrokerAdapter):
     def market_open_soon(self) -> bool:
         return self._inner.market_open_soon()
 
+    def session_date(self) -> date:
+        return self._inner.session_date()
+
 
 class MockBroker(BrokerAdapter):
     """In-memory broker for tests and offline development."""
@@ -143,6 +177,7 @@ class MockBroker(BrokerAdapter):
         self.orders: list[tuple[str, float, str]] = []
         self.pending: list[OpenOrder] = []
         self.cancelled: list[str] = []
+        self.session: date | None = None   # fixed session for tests; None = today (NY)
 
     def account(self) -> AccountState:
         return self.state
@@ -160,3 +195,6 @@ class MockBroker(BrokerAdapter):
 
     def market_open_soon(self) -> bool:
         return True
+
+    def session_date(self) -> date:
+        return self.session or super().session_date()

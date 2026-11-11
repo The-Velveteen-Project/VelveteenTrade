@@ -9,16 +9,23 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 Action = Literal["BUY", "SELL", "HOLD"]
 
 
 class TechnicalSnapshot(BaseModel):
-    """Deterministic indicator values computed in pandas — never by an LLM."""
+    """Deterministic indicator values computed in pandas — never by an LLM.
+
+    NaN/inf are refused at construction (B3): in Python every comparison with
+    NaN is False, so a NaN close silently disarmed the stop (`close <= stop`)
+    and poisoned the turnover budget. A missing indicator is None, never NaN.
+    """
+
+    model_config = ConfigDict(allow_inf_nan=False)
 
     symbol: str
-    close: float
+    close: float = Field(..., gt=0)
     sma_50: Optional[float] = None
     sma_200: Optional[float] = None
     rsi_14: Optional[float] = None

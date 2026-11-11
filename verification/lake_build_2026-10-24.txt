@@ -1,0 +1,29 @@
+lake build — verification/lean (commit 9e3614d), 2026-10-24
+Toolchain: Lean (version 4.34.1, aarch64-unknown-linux-gnu, commit 5045d0056413266e57c625dcd7c365b10e377c52, Release)
+Copia de los tres archivos fuera del repo (no se escribió .lake/ en verification/lean).
+
+$ lake build
+✔ [2/3] Built VelveteenRisk (1.3s)
+Build completed successfully (3 jobs).
+
+$ lake env lean Axioms.lean   # #print axioms de los 17 teoremas
+'Velveteen.roundQty_spec' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.stopPrice_ge' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.mul_le_of_le_div' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.div_lt_of_lt_mul' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.trim_spec' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.cap_mono' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.buySize_caps' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.buySize_risk' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.hold_never_orders' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.sell_only_closes' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.buy_risk_le_budget' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.stop_loss_le_budget' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.step_preserves' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.cycle_safe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.velveteen_cycle_safe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.demoStart_inv' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.old_gate_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+
+Búsqueda textual en VelveteenRisk.lean de sorry|admit|axiom|native_decide|implemented_by|extern|unsafe: solo aparece en comentarios (línea 14) y en el nombre old_gate_unsafe.
+Nota menor: demoStart_inv usa 'decide +kernel +kernel' (bandera duplicada); compila igual.

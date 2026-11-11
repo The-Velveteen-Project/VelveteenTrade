@@ -7,6 +7,7 @@ sequentially, in screen-rank order, so budgets are deterministic.
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from . import agents, indicators, risk
@@ -20,6 +21,15 @@ from .schemas import AnalystReport, ExecutiveDecision, JournalEntry, TechnicalSn
 log = logging.getLogger(__name__)
 
 MAX_WORKERS = 4
+
+# R2b: the bot runs /ciclo and the 21:30 job in worker threads of ONE process.
+# Two cycles at once would both seed from the same broker photograph and
+# each see at most part of the other's orders. One cycle at a time.
+_CYCLE_LOCK = threading.Lock()
+
+
+class CycleInProgress(RuntimeError):
+    """Raised instead of starting a cycle while another one is running."""
 
 
 def _canon_queries(snap: TechnicalSnapshot, sector: str | None) -> dict[str, str]:
@@ -75,34 +85,65 @@ def run_cycle(
     llm: StructuredLLM,
     journal: Journal,
 ) -> dict:
-    """One full decision cycle. Returns a summary dict for logging/notification."""
+    """One full decision cycle. Returns a summary dict for logging/notification.
+
+    Never runs concurrently with another cycle in this process: a second call
+    while one is running raises CycleInProgress immediately (it does not wait
+    and then trade on a stale view)."""
+    if not _CYCLE_LOCK.acquire(blocking=False):
+        raise CycleInProgress("Another trading cycle is already running.")
+    try:
+        return _run_cycle(settings, broker, data, llm, journal)
+    finally:
+        _CYCLE_LOCK.release()
+
+
+def _run_cycle(
+    settings: Settings,
+    broker: BrokerAdapter,
+    data: MarketData,
+    llm: StructuredLLM,
+    journal: Journal,
+) -> dict:
     account = broker.account()
-
-    # ------------------------------------------- 0. Reconcile with the broker
-    # Broker fills are the source of truth for entry prices (the price recorded
-    # at order time was the prior close, not the actual fill).
-    journal.reconcile_entries(account.positions)
-
-    # Capital base: if the user's profile states an investment amount, the
-    # engine sizes against THAT, not the (paper) account's full equity — a
-    # $100k demo account trading like a $200 one, which is the point.
-    from . import profile as profile_mod
-
-    prof = profile_mod.load(settings.profile_path)
-    if prof and prof.capital:
-        effective_equity = min(account.equity, float(prof.capital))
-        log.info("Capital base from profile: sizing against $%.2f (account equity $%.2f)",
-                 effective_equity, account.equity)
-        account = AccountState(equity=effective_equity, cash=account.cash,
-                               positions=account.positions)
-    peak_equity = journal.update_peak_equity(account.equity)
-    journal.record_equity(account.equity)
 
     # Pending (unfilled) orders — e.g. queued while the market is closed — are
     # exposure the account() snapshot doesn't show. A symbol with an order in
     # flight is untouchable this cycle: no re-analysis, no second order.
     pending = broker.open_orders()
     pending_symbols = {o.symbol for o in pending}
+
+    # ------------------------------------------- 0. Reconcile with the broker
+    # Broker fills are the source of truth for entry prices (the price recorded
+    # at order time was the prior close, not the actual fill). A dry run must
+    # not edit the real journal's entries or frozen stops.
+    if broker.sends_orders:
+        journal.reconcile_entries(account.positions,
+                                  pending_buys={o.symbol for o in pending if o.side == "buy"})
+
+    # Profile: read EVERY cycle (B7 — the bot used to keep the limits it
+    # computed at startup, so a new /start profile never reached the gate).
+    # Its deterministic limits replace config.yaml's.
+    from . import capital as capital_mod
+    from . import profile as profile_mod
+
+    prof = profile_mod.load(settings.profile_path)
+    limits = profile_mod.limits_for(prof) if prof else settings.risk
+
+    # Capital base (B6/B8, see capital.py): size against the satellite the
+    # user allocated (E); track record and drawdown halt read what it is
+    # worth today (V), losses included — a $100k demo account trading like a
+    # $200 one, honestly.
+    base = capital_mod.resolve(journal, prof, account.equity)
+    if base.rebased:
+        log.info("New capital base: satellite $%.2f (core %.0f%%, account $%.2f).",
+                 base.allocated, base.core_weight * 100, account.equity)
+    log.info("Satellite value $%.2f, sizing against $%.2f (account equity $%.2f)",
+             base.value, base.sizing, account.equity)
+    account = AccountState(equity=base.sizing, cash=account.cash, positions=account.positions)
+    peak_equity = journal.update_peak_equity(base.value)
+    journal.record_equity(base.value)
+
     if pending:
         log.warning("Pending orders detected — skipping these symbols this cycle: %s",
                     sorted(pending_symbols))
@@ -127,19 +168,41 @@ def run_cycle(
     # every approved order updates, so caps hold across the whole cycle, not
     # just per decision. Stopped-out positions stay counted until the next
     # cycle's broker snapshot — conservative, since their sells may not fill.
-    ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors)
-    ctx.seed(account)
+    #
+    # B2: the shadow must also start from what EARLIER cycles committed and
+    # the snapshot does not show — pending orders (valued at the last close)
+    # and the turnover already booked for the session they execute in.
+    session = broker.session_date().isoformat()
+    booked = journal.booked_turnover(session)
+    prices = {s: sn.close for s, sn in snaps.items()}
+    for s, pos in account.positions.items():
+        if s not in prices and pos.qty:
+            prices[s] = abs(pos.market_value / pos.qty)
+    ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors, current_value=base.value)
+    ctx.seed(account, pending=pending, prices=prices, booked=booked)
+    summary["session"] = session
+    summary["turnover_seeded"] = round(ctx.turnover_used, 2)
+    if ctx.unvalued:
+        log.warning("Pending orders that cannot be valued: %s — new buys halted this cycle.",
+                    sorted(set(ctx.unvalued)))
 
     # ------------------------------------------ 2. Deterministic stops FIRST
     entries = journal.entry_prices()
-    for verdict in risk.check_stops(account, snaps, settings.risk, entries,
-                                    stops=journal.stop_prices()):
+    unchecked: list[str] = []
+    stop_verdicts = risk.check_stops(account, snaps, limits, entries,
+                                     stops=journal.stop_prices(), unchecked=unchecked)
+    summary["stops_unchecked"] = unchecked
+    for verdict in stop_verdicts:
         if verdict.symbol in pending_symbols:
             log.warning("Stop hit on %s but an order is already pending — not doubling.",
                         verdict.symbol)
             continue
         order_id = broker.submit_order(verdict.symbol, verdict.qty, "sell")
-        journal.clear_entry(verdict.symbol)
+        ctx.mark_traded(verdict.symbol)
+        if broker.sends_orders:
+            journal.book_turnover(session, order_id,
+                                  verdict.qty * prices.get(verdict.symbol, float("inf")))
+            journal.clear_entry(verdict.symbol)
         journal.record(JournalEntry(symbol=verdict.symbol, verdict=verdict, executed=True,
                                     note=f"stop-loss order {order_id}"))
         summary["stops"].append(verdict.symbol)
@@ -147,8 +210,10 @@ def run_cycle(
     # ------------------------------------------------ 3. Candidate selection
     held_symbols = [s for s in account.positions if s in snaps and s not in summary["stops"]]
     screened = indicators.screen(list(snaps.values()), settings.candidates_per_cycle)
+    # B5: a symbol stopped out this cycle must not come back through the
+    # screen — it has a sell in flight; any further order would be a second one.
     candidates = [s for s in dict.fromkeys(held_symbols + [s.symbol for s in screened])
-                  if s not in pending_symbols]
+                  if s not in pending_symbols and s not in summary["stops"]]
 
     # --------------------------------------- 4. Analysis (parallel, LLM-bound)
     # SQLite (journal, RAG) is main-thread only — prefetch lessons and canon
@@ -214,7 +279,7 @@ def run_cycle(
                 ))
                 continue
 
-        verdict = risk.evaluate(decision, snap, account, settings.risk, ctx)
+        verdict = risk.evaluate(decision, snap, account, limits, ctx)
         if verdict.symbol != symbol:  # defence in depth: never order what was not judged
             raise RuntimeError(f"risk verdict for {verdict.symbol!r} used for order on {symbol!r}")
         entry = JournalEntry(
@@ -226,14 +291,21 @@ def run_cycle(
         if verdict.approved:
             side = "buy" if verdict.action == "BUY" else "sell"
             order_id = broker.submit_order(symbol, verdict.qty, side)
+            if broker.sends_orders:
+                journal.book_turnover(session, order_id, verdict.qty * snap.close)
             entry.executed = True
             entry.note = f"order {order_id}"
-            if side == "buy":
+            if not broker.sends_orders:
+                pass  # dry run: never touch the real journal's entries or stops
+            elif side == "buy":
                 # Provisional entry price (last close); reconciled to the real
                 # fill from the broker at the start of the next cycle.
                 journal.set_entry_price(symbol, snap.close)
                 if verdict.stop_price is not None:
-                    journal.set_stop(symbol, verdict.stop_price)
+                    in_force = journal.set_stop(symbol, verdict.stop_price)
+                    if in_force != verdict.stop_price:
+                        entry.note += (f"; frozen stop kept at {in_force} (tighten-only, "
+                                       f"this lot's own stop {verdict.stop_price})")
             else:
                 journal.clear_entry(symbol)
             summary["orders"].append(f"{side.upper()} {symbol} x{verdict.qty}")

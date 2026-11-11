@@ -27,7 +27,7 @@ from .config import Settings
 from .data import MarketData
 from .llm import StructuredLLM
 from .memory import Journal
-from .pipeline import run_cycle
+from .pipeline import CycleInProgress, run_cycle
 
 log = logging.getLogger(__name__)
 
@@ -72,11 +72,14 @@ def format_informe(broker, journal: Journal, capital: float | None) -> str:
     lines = [f"📋 Informe — {today}"]
 
     if hist:
-        eq0, eq_now = hist[0][1], hist[-1][1]
+        from .capital import pnl_since_base
+
+        eq0, eq_now, since = pnl_since_base(journal)
         pnl = eq_now - eq0
         pct = (pnl / eq0 * 100) if eq0 else 0.0
-        lines.append(f"Capital de trabajo: {_fmt_money(eq_now)} "
-                     f"({'+' if pnl >= 0 else ''}{_fmt_money(pnl)}, {pct:+.2f}% desde el inicio)")
+        desde = f"desde el {since[:10]}" if since else "desde el inicio"
+        lines.append(f"Valor del satélite: {_fmt_money(eq_now)} "
+                     f"({'+' if pnl >= 0 else ''}{_fmt_money(pnl)}, {pct:+.2f}% {desde})")
     elif capital:
         lines.append(f"Capital de trabajo: {_fmt_money(capital)} (sin ciclos registrados aún)")
 
@@ -120,8 +123,13 @@ def _fmt_money(x: float) -> str:
 def format_estado(broker, journal: Journal, capital: float | None) -> str:
     acct = broker.account()
     lines = [f"Equity de la cuenta demo: {_fmt_money(acct.equity)}"]
-    if capital:
-        lines.append(f"Tu capital de trabajo: {_fmt_money(capital)} (el sistema opera solo con esto)")
+    if capital is not None:
+        from .capital import current_base
+
+        base = current_base(journal)
+        sat = (f"; el sistema opera solo el satélite: {_fmt_money(base['allocated'])} "
+               "(el resto es tu núcleo de ETF)") if base else " (el sistema opera solo con esto)"
+        lines.append(f"Tu capital de trabajo: {_fmt_money(capital)}{sat}")
     if acct.positions:
         lines.append("\nPosiciones:")
         for p in acct.positions.values():
@@ -141,6 +149,9 @@ def format_cycle_summary(summary: dict, journal: Journal) -> str:
     lines = ["Ciclo completado."]
     if summary.get("stops"):
         lines.append("🛑 Stops ejecutados: " + ", ".join(summary["stops"]))
+    if summary.get("stops_unchecked"):
+        lines.append("⚠️ Stop SIN revisar (no hay precio válido): "
+                     + ", ".join(summary["stops_unchecked"]) + ". Revisa esas posiciones a mano.")
     if summary.get("orders"):
         lines.append("\nÓrdenes:")
         recent = {r["symbol"]: r for r in journal.recent(30)}
@@ -363,6 +374,9 @@ def run_bot(settings: Settings) -> None:
             summary = await asyncio.to_thread(_cycle_in_thread)
             await _send_long(ctx.bot, update.effective_chat.id,
                              format_cycle_summary(summary, journal))
+        except CycleInProgress:
+            await update.message.reply_text(
+                "Ya hay un ciclo corriendo; no arranco otro. Espera a que termine.")
         except Exception as exc:  # noqa: BLE001
             log.exception("Cycle failed")
             await update.message.reply_text(f"El ciclo falló: {exc}")
@@ -391,6 +405,8 @@ def run_bot(settings: Settings) -> None:
                 await ctx.bot.send_message(int(chat_id),
                                            "📊 Ciclo diario automático\n\n"
                                            + format_cycle_summary(summary, journal))
+        except CycleInProgress:
+            log.warning("Scheduled cycle skipped: another cycle is already running.")
         except Exception as exc:  # noqa: BLE001
             log.exception("Scheduled cycle failed")
             if chat_id:

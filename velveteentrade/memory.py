@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .schemas import JournalEntry
+
+log = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS journal (
@@ -39,6 +43,12 @@ CREATE TABLE IF NOT EXISTS equity_history (
     ts TEXT PRIMARY KEY,
     equity REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS turnover (
+    session TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    notional REAL NOT NULL,
+    PRIMARY KEY (session, order_id)
+);
 """
 
 
@@ -67,14 +77,23 @@ class Journal:
         self._conn.execute("DELETE FROM stops WHERE symbol = ?", (symbol,))
         self._conn.commit()
 
-    def set_stop(self, symbol: str, stop_price: float) -> None:
-        """Freeze the stop computed by the risk gate at buy time (see risk.check_stops)."""
+    def set_stop(self, symbol: str, stop_price: float) -> float:
+        """Freeze the stop computed by the risk gate at buy time (see risk.check_stops).
+
+        TIGHTEN-ONLY (B4): there is one stop per symbol, shared by every lot.
+        An add-on buy computes its stop from today's price and ATR, which can
+        be far LOWER than the stop the first lot was sized with; overwriting
+        it broke G2 for that lot (1 500 lost on a 1 000 budget). Keeping the
+        max of old and new bounds the loss of EVERY lot by its own budget:
+        a higher stop only shortens each lot's distance to it (model P4).
+        Returns the stop in force after the call."""
         self._conn.execute(
             "INSERT INTO stops (symbol, stop_price) VALUES (?, ?) "
-            "ON CONFLICT(symbol) DO UPDATE SET stop_price=excluded.stop_price",
+            "ON CONFLICT(symbol) DO UPDATE SET stop_price=MAX(stops.stop_price, excluded.stop_price)",
             (symbol, float(stop_price)),
         )
         self._conn.commit()
+        return self.stop_prices()[symbol]
 
     def stop_prices(self) -> dict[str, float]:
         rows = self._conn.execute("SELECT symbol, stop_price FROM stops").fetchall()
@@ -102,6 +121,34 @@ class Journal:
             ).fetchall()
         return [r[0] for r in rows]
 
+    # ------------------------------------------------------------- turnover
+    def book_turnover(self, session: str, order_id: str, notional: float) -> None:
+        """Book an order's notional against the trading SESSION it executes in.
+
+        Keyed by order id so a cycle can tell its own booked orders from
+        pending orders it has never seen (placed by hand, or before this
+        ledger existed) and count each exactly once.
+
+        A non-finite notional (e.g. a NaN price) is booked as +inf: an
+        unknown spend must exhaust the session budget, never vanish from it
+        (SQLite would store NaN as NULL)."""
+        notional = abs(float(notional))
+        if not math.isfinite(notional):
+            log.error("Turnover for order %s is not finite (%r) — booking +inf: no more "
+                      "turnover this session.", order_id, notional)
+            notional = math.inf
+        self._conn.execute(
+            "INSERT OR REPLACE INTO turnover (session, order_id, notional) VALUES (?, ?, ?)",
+            (session, str(order_id), notional),
+        )
+        self._conn.commit()
+
+    def booked_turnover(self, session: str) -> dict[str, float]:
+        rows = self._conn.execute(
+            "SELECT order_id, notional FROM turnover WHERE session = ?", (session,)
+        ).fetchall()
+        return {oid: n for oid, n in rows}
+
     # ------------------------------------------------------------------- kv
     def get_float(self, key: str, default: float | None = None) -> float | None:
         row = self._conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
@@ -112,6 +159,18 @@ class Journal:
             "INSERT INTO kv (key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, str(value)),
+        )
+        self._conn.commit()
+
+    def get_str(self, key: str, default: str | None = None) -> str | None:
+        row = self._conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return str(row[0]) if row else default
+
+    def set_str(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
         )
         self._conn.commit()
 
@@ -134,20 +193,26 @@ class Journal:
         self.set_float("peak_equity", peak)
         return peak
 
-    def reconcile_entries(self, positions: dict) -> None:
+    def reconcile_entries(self, positions: dict, pending_buys: set[str] | frozenset = frozenset()) -> None:
         """Sync journal entry prices with the broker's actual fills.
 
         The broker's avg_entry is the source of truth — it corrects the
         provisional last-close price recorded at order time, and clears
         entries for symbols no longer held (manual closes, full stops).
+
+        Frozen stops of symbols that are neither held nor waiting on a queued
+        BUY are cleared too: since stops are tighten-only (B4), an orphan stop
+        left by a manual close would otherwise be inherited by a later re-buy
+        at a lower price and sell it at once. A stop with a queued buy behind
+        it survives — that buy is about to become the position it protects.
         """
         held = set(positions)
         for symbol in list(self.entry_prices()):
             if symbol not in held:
-                # Entry only: a frozen stop must survive a buy that is still
-                # queued (not yet a position). It is cleared on sell/stop, and
-                # overwritten by the next approved buy of the symbol.
                 self._conn.execute("DELETE FROM entries WHERE symbol = ?", (symbol,))
+        for symbol in list(self.stop_prices()):
+            if symbol not in held and symbol not in pending_buys:
+                self._conn.execute("DELETE FROM stops WHERE symbol = ?", (symbol,))
         self._conn.commit()
         for symbol, pos in positions.items():
             if pos.avg_entry and pos.avg_entry > 0:

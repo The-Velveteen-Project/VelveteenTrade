@@ -1,4 +1,7 @@
 """End-to-end dry run with mock broker, mock LLM, and synthetic data — no network."""
+import json
+import zlib
+
 import numpy as np
 import pandas as pd
 
@@ -14,7 +17,9 @@ class FakeData:
     """Synthetic uptrending market data; no network, no cache."""
 
     def daily_bars(self, symbol, days=320):
-        rng = np.random.default_rng(abs(hash(symbol)) % 2**32)
+        # crc32, not hash(): str hashing is salted per process (PYTHONHASHSEED),
+        # which made the screen order — and this test — random.
+        rng = np.random.default_rng(zlib.crc32(symbol.encode()))
         rets = rng.normal(0.001, 0.01, days)
         close = 100 * np.exp(np.cumsum(rets))
         return pd.DataFrame({
@@ -29,11 +34,24 @@ class FakeData:
         return [{"headline": "Quarterly results in line", "created_at": "2026-08-28", "summary": ""}]
 
 
+class EchoLLM(MockLLM):
+    """Canned responses, but naming the symbol actually under analysis (since B1,
+    a decision that names another symbol is rejected, never ordered)."""
+
+    def complete(self, model, system, user, schema, max_retries=2):
+        obj = super().complete(model, system, user, schema, max_retries)
+        try:
+            sym = json.loads(user).get("symbol")
+        except Exception:
+            sym = None
+        return obj.model_copy(update={"symbol": sym}) if sym and hasattr(obj, "symbol") else obj
+
+
 def test_full_cycle_dry(tmp_path):
     settings = Settings(universe=["AAA", "BBB", "CCC"], candidates_per_cycle=2,
                         db_path=tmp_path / "j.db", cache_dir=tmp_path)
     broker = MockBroker(equity=100_000)
-    llm = MockLLM(responses={
+    llm = EchoLLM(responses={
         "AnalystReport": AnalystReport(symbol="AAA", stance="BULLISH",
                                        summary="Strong.", data_quality="FULL"),
         "ExecutiveDecision": ExecutiveDecision(symbol="AAA", action="BUY", conviction=4,

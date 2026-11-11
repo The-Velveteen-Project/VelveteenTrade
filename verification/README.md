@@ -87,3 +87,24 @@ Para fortalecerlo falta lo siguiente:
 - tests diferenciales que ejecuten el modelo Lean (compilado) contra `risk.py` con las mismas entradas;
 - portar a `Decimal` o acotar el error de punto flotante;
 - el experimento con los agentes de rl_metodos descrito arriba.
+
+## 8. Actualización del 24 oct 2026: la prueba era correcta sobre el objeto equivocado
+
+La auditoría del 24 oct (`parches_2026-10-24/INFORME_brechas.md`, fuera del repo) encontró que `cycle_safe` es un teorema correcto **sobre la cartera sombra que construye `evaluate`**, pero que la cuenta real podía alejarse de ella. Hubo 10 violaciones, cada una reproducida con un test. Esta sección no reemplaza nada de lo anterior: el teorema original y su historia siguen tal cual.
+
+Arreglos en la rama `fix/b2-b8-sombra` (un commit por bug; los tests de reproducción de `tests/test_brechas.py` quedaron invertidos como regresión):
+
+| Bug | Qué separaba la sombra de la cuenta | Arreglo |
+|---|---|---|
+| B1 | la puerta juzgaba un símbolo y la orden salía con otro | rama `fix/b1-auth` |
+| B2 | las órdenes en cola no entraban en la sombra; el turnover era por ciclo | se siembra con las pendientes y el turnover se lleva por sesión (P3) |
+| R2b | dos ciclos simultáneos partían de la misma foto | candado de ciclo |
+| B3 | un NaN apagaba stops y topes, porque toda comparación con NaN es False | se falla cerrado en el snapshot, en la puerta y en el barrido de stops (P5) |
+| B4 | una compra adicional aflojaba el stop congelado del primer lote | el stop solo se aprieta (P4) |
+| B5, D3 | segunda orden sobre un símbolo del ciclo (doble venta; BUY y luego SELL) | `traded` en la puerta, que inicia el barrido (P2, P7) |
+| B6–B8 | una sola cifra de capital para dimensionar, para el freno y para el track record | S / V / E en `capital.py` (P8) |
+| D5 | `RoundDown` y `stopPrice_ge` eran falsas en floats | `Decimal` exacto: las hipótesis valen para la función desplegada |
+
+Sobre el §5.1 («Floats»): D5 cierra las dos hipótesis de redondeo y B3 cierra los NaN. Queda la aritmética interna de `evaluate` en floats.
+
+Lean: `lake build` con el toolchain oficial v4.34.1 confirma la verificación del 8 oct (ver `lake_build_2026-10-24.txt` y `SHA256SUMS`). Los enunciados de la ronda 2, ajustados a estos arreglos, están propuestos y demostrados fuera del repo; entran a `lean/` solo cuando se aprueben.
