@@ -128,7 +128,8 @@ def _run_cycle(
     from . import profile as profile_mod
 
     prof = profile_mod.load(settings.profile_path)
-    limits = profile_mod.limits_for(prof) if prof else settings.risk
+    window = settings.risk.drawdown_window_sessions   # R31: de config.yaml, no del perfil
+    limits = profile_mod.limits_for(prof, window=window) if prof else settings.risk
 
     # Capital base (B6/B8, see capital.py): size against the satellite the
     # user allocated (E); track record and drawdown halt read what it is
@@ -141,7 +142,12 @@ def _run_cycle(
     log.info("Satellite value $%.2f, sizing against $%.2f (account equity $%.2f)",
              base.value, base.sizing, account.equity)
     account = AccountState(equity=base.sizing, cash=account.cash, positions=account.positions)
-    peak_equity = journal.update_peak_equity(base.value)
+    # R31: el pico del freno es el máximo de las últimas N sesiones de la base
+    # actual, no el histórico (que no se soltaba nunca tras quedar en efectivo).
+    session = broker.session_date().isoformat()
+    since = (capital_mod.current_base(journal) or {}).get("since")
+    peak_equity = journal.update_window_peak(session, base.value, limits.drawdown_window_sessions,
+                                             since=since)
     journal.record_equity(base.value)
 
     if pending:
@@ -172,7 +178,6 @@ def _run_cycle(
     # B2: the shadow must also start from what EARLIER cycles committed and
     # the snapshot does not show — pending orders (valued at the last close)
     # and the turnover already booked for the session they execute in.
-    session = broker.session_date().isoformat()
     booked = journal.booked_turnover(session)
     prices = {s: sn.close for s, sn in snaps.items()}
     for s, pos in account.positions.items():

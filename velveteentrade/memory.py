@@ -7,6 +7,7 @@ import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .schemas import JournalEntry
 
@@ -42,6 +43,10 @@ CREATE TABLE IF NOT EXISTS kv (
 CREATE TABLE IF NOT EXISTS equity_history (
     ts TEXT PRIMARY KEY,
     equity REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS session_peaks (
+    session TEXT PRIMARY KEY,
+    peak REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS turnover (
     session TEXT NOT NULL,
@@ -188,10 +193,100 @@ class Journal:
         ).fetchall()
 
     def update_peak_equity(self, equity: float) -> float:
-        """Persist the all-time peak equity; returns the current peak."""
+        """Persist the all-time peak equity; returns the current peak.
+
+        HISTÓRICO: el freno por drawdown ya no lo usa (R31, ver
+        update_window_peak). Se conserva para lectura y compatibilidad."""
         peak = max(self.get_float("peak_equity", equity) or equity, equity)
         self.set_float("peak_equity", peak)
         return peak
+
+    # ------------------------------------------------ R31: pico con ventana
+    def update_window_peak(self, session: str, value: float, window: int,
+                           since: str | None = None) -> float | None:
+        """Pico del freno por drawdown: máximo del valor del satélite en las
+        últimas `window` sesiones con registro, incluida `session` (R31).
+
+        Antes el pico era el histórico: tras un stop a efectivo el valor ya no
+        puede volver a él y el freno no se soltaba nunca. Con la ventana, el
+        pico viejo sale de la ventana a las `window` sesiones y el freno se
+        suelta si el satélite no ha caído más que el umbral dentro de ella.
+
+        - Una fila por sesión (`session`, ISO) con el MÁXIMO de los ciclos de
+          esa sesión: varios ciclos el mismo día no acortan la ventana.
+        - Se cuentan sesiones CON REGISTRO: si el bot no corre unos días, la
+          ventana abarca más calendario (conservador: el pico dura más).
+        - Un valor no finito no se guarda (SQLite lo volvería NULL); la puerta
+          rechaza las compras con un valor no finito (fail-closed, B3).
+        - Tabla vacía (primera corrida con este código, o recién re-basado por
+          capital.reset_window_peak): se reconstruye desde equity_history de
+          la base actual (`since`), agrupando por fecha de Nueva York; si no
+          hay historia, se toma el pico guardado en kv `peak_equity`, como
+          pico de esta sesión (caduca a las `window` sesiones).
+        - `window` mayor que la historia: el máximo de toda la historia de la
+          base (el comportamiento de antes, mientras la historia sea corta).
+
+        Devuelve el pico de la ventana (None si no hay ningún valor finito) y
+        lo deja en kv `peak_equity` para que se pueda consultar."""
+        from .config import check_window
+        check_window(window)
+        empty = self._conn.execute("SELECT COUNT(*) FROM session_peaks").fetchone()[0] == 0
+        if empty:
+            self._seed_session_peaks(session, since)
+        if math.isfinite(value):
+            self._conn.execute(
+                "INSERT INTO session_peaks (session, peak) VALUES (?, ?) "
+                "ON CONFLICT(session) DO UPDATE SET peak=MAX(session_peaks.peak, excluded.peak)",
+                (session, float(value)),
+            )
+        # La ventana: las `window` sesiones más recientes hasta `session`.
+        # Las anteriores ya no cuentan para nada; se podan.
+        keep = [r[0] for r in self._conn.execute(
+            "SELECT session FROM session_peaks WHERE session <= ? ORDER BY session DESC LIMIT ?",
+            (session, window)).fetchall()]
+        if keep:
+            self._conn.execute("DELETE FROM session_peaks WHERE session < ?", (min(keep),))
+        row = self._conn.execute(
+            "SELECT MAX(peak) FROM session_peaks WHERE session >= ? AND session <= ?",
+            (min(keep), session)).fetchone() if keep else (None,)
+        self._conn.commit()
+        peak = row[0]
+        if peak is None:
+            return None
+        peak = float(peak)
+        self.set_float("peak_equity", peak)
+        return peak
+
+    def _seed_session_peaks(self, session: str, since: str | None) -> None:
+        ny = ZoneInfo("America/New_York")
+        per_session: dict[str, float] = {}
+        for ts, eq in self.equity_history():
+            if since is not None and ts < since:
+                continue
+            if eq is None or not math.isfinite(eq):
+                continue
+            try:
+                day = datetime.fromisoformat(ts).astimezone(ny).date().isoformat()
+            except ValueError:
+                continue
+            day = min(day, session)   # nunca una sesión posterior a la actual
+            per_session[day] = max(per_session.get(day, -math.inf), float(eq))
+        if not per_session:
+            legacy = self.get_float("peak_equity")
+            if legacy is not None and math.isfinite(legacy):
+                # Sin historia: el pico guardado vale como pico de ESTA sesión
+                # (conservador: retiene el freno `window` sesiones más).
+                per_session[session] = legacy
+        for day, peak in per_session.items():
+            self._conn.execute(
+                "INSERT OR REPLACE INTO session_peaks (session, peak) VALUES (?, ?)", (day, peak))
+
+    def reset_window_peak(self, value: float) -> None:
+        """Base de capital nueva (B6c): el pico reinicia en `value` y la
+        historia de la ventana de la base anterior se descarta."""
+        self._conn.execute("DELETE FROM session_peaks")
+        self._conn.commit()
+        self.set_float("peak_equity", value)
 
     def reconcile_entries(self, positions: dict, pending_buys: set[str] | frozenset = frozenset()) -> None:
         """Sync journal entry prices with the broker's actual fills.

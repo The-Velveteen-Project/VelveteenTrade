@@ -86,9 +86,14 @@ def effective_tolerance(profile: RiskProfile) -> int:
     return max(1, t)
 
 
-def limits_for(profile: RiskProfile) -> RiskLimits:
+def limits_for(profile: RiskProfile, window: int | None = None) -> RiskLimits:
+    """Límites del perfil. `window` (R31) es la ventana del freno por drawdown:
+    no depende del perfil sino de config.yaml (la decide Carlos); None = el
+    valor por defecto de RiskLimits."""
     row = _TOLERANCE_TABLE[effective_tolerance(profile)]
     kwargs = {k: v for k, v in row.items() if k != "etf_core_weight"}
+    if window is not None:
+        kwargs["drawdown_window_sessions"] = window
     return RiskLimits(**kwargs)
 
 
@@ -113,5 +118,5 @@ def apply_profile(settings: Settings) -> Settings:
     """If a profile exists, its deterministic limits replace config.yaml's."""
     profile = load(settings.profile_path)
     if profile is not None:
-        settings.risk = limits_for(profile)
+        settings.risk = limits_for(profile, window=settings.risk.drawdown_window_sessions)
     return settings

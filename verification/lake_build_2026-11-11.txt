@@ -1,0 +1,23 @@
+lake build — verification/lean (R31: VelveteenDrawdown.lean), 2026-11-11
+Toolchain: Lean (version 4.34.1, x86_64-unknown-linux-gnu, commit 5045d0056413266e57c625dcd7c365b10e377c52, Release)
+Copia de los archivos fuera del repo (no se escribió .lake/ en verification/lean).
+
+$ lake build
+✔ [2/5] Built VelveteenRisk (2.0s)
+✔ [4/5] Built VelveteenDrawdown (763ms)
+Build completed successfully (5 jobs).
+
+$ lake env lean Axioms.lean   # #print axioms de los teoremas nuevos y dos del archivo base
+'Velveteen.Drawdown.le_peakBack' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.Drawdown.peakBack_attained' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.Drawdown.window_halt_blocks_buy' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.Drawdown.halted_iff_drawdown' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.Drawdown.window_halt_releases' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.Drawdown.flat_window_releases' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.Drawdown.r31_peak' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.Drawdown.r31_all_time_never_releases' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.Drawdown.r31_window_releases' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.cycle_safe' depends on axioms: [propext, Classical.choice, Quot.sound]
+'Velveteen.old_gate_unsafe' depends on axioms: [propext, Classical.choice, Quot.sound]
+
+Búsqueda textual en VelveteenDrawdown.lean de sorry|admit|axiom|native_decide|implemented_by|extern|unsafe: sin coincidencias.

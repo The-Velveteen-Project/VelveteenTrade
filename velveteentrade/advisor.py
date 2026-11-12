@@ -114,7 +114,7 @@ def extract_profile(llm: StructuredLLM, model: str, transcript: list[dict]) -> R
 
 def explain_plan(llm: StructuredLLM, model: str, prof: RiskProfile,
                  settings: Settings) -> str:
-    limits = profile_mod.limits_for(prof)
+    limits = profile_mod.limits_for(prof, window=settings.risk.drawdown_window_sessions)
     core = profile_mod.etf_core_weight(prof)
     retriever = Retriever(settings.rag_db_path)
     canon = retriever.excerpts(
@@ -128,7 +128,8 @@ def explain_plan(llm: StructuredLLM, model: str, prof: RiskProfile,
         f"LÍMITES FIJADOS: máx {limits.max_position_pct:.0%} por posición, "
         f"máx {limits.max_positions} posiciones, máx {limits.max_sector_exposure_pct:.0%} por sector, "
         f"riesgo por operación {limits.per_trade_risk_pct:.1%} del capital, "
-        f"freno de compras si la cartera cae {limits.max_drawdown_halt_pct:.0%} desde su máximo, "
+        f"freno de compras si la cartera cae {limits.max_drawdown_halt_pct:.0%} desde su máximo "
+        f"de las últimas {limits.drawdown_window_sessions} sesiones, "
         f"stop-loss automático a 2x la volatilidad diaria típica (ATR), "
         f"convicción mínima {limits.min_conviction}/5 para operar.\n\n"
         f"EVIDENCIA DEL CANON:\n" + "\n\n".join(canon)
