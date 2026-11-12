@@ -1,5 +1,8 @@
 name = "velveteen_risk"
-defaultTargets = ["VelveteenRisk"]
+defaultTargets = ["VelveteenRisk", "VelveteenDrawdown"]
 
 [[lean_lib]]
 name = "VelveteenRisk"
+
+[[lean_lib]]
+name = "VelveteenDrawdown"

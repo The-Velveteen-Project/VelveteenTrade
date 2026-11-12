@@ -82,7 +82,7 @@ def cmd_profile(settings) -> None:
     if prof is None:
         print("Sin perfil. Corre: python -m velveteentrade advisor")
         return
-    limits = profile_mod.limits_for(prof)
+    limits = profile_mod.limits_for(prof, window=settings.risk.drawdown_window_sessions)
     eff = profile_mod.effective_tolerance(prof)
     print(f"Perfil: {prof.name} | tolerancia declarada {prof.tolerance}/5 → efectiva {eff}/5")
     print(f"Horizonte: {prof.horizon_years} años | experiencia: {prof.experience} | "
@@ -90,7 +90,8 @@ def cmd_profile(settings) -> None:
     print(f"Núcleo ETF: {profile_mod.etf_core_weight(prof):.0%}")
     print(f"Límites activos: pos máx {limits.max_position_pct:.0%}, {limits.max_positions} posiciones, "
           f"sector {limits.max_sector_exposure_pct:.0%}, riesgo/op {limits.per_trade_risk_pct:.1%}, "
-          f"freno drawdown {limits.max_drawdown_halt_pct:.0%}, convicción mín {limits.min_conviction}")
+          f"freno drawdown {limits.max_drawdown_halt_pct:.0%} "
+          f"(pico de {limits.drawdown_window_sessions} sesiones), convicción mín {limits.min_conviction}")
 
 
 def cmd_run(settings, dry_run: bool) -> None:

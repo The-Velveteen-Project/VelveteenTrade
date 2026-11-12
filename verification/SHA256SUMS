@@ -1,6 +1,8 @@
 # SHA-256 de verification/lean/. Cada cambio aprobado de un enunciado agrega aquí su SHA y una línea con fecha.
 # Comprobar: (cd verification && sha256sum -c SHA256SUMS)
 0f5f1d5dbd972c8415ca53cd315600f3e0f72bdb92042f84f8b5a8309ba571bd  lean/VelveteenRisk.lean
-dc6f754256458de3873231eae2fe88bd96eeee6c7d65134cee3265f6eae67856  lean/lakefile.toml
+a2264fa4953ebcea779ace72aac1c23c8fde5d516c8cd5e8620027026f5ad055  lean/VelveteenDrawdown.lean
+e074e22e486e318d03860808b4835a44dcab59d21326cf4662542579f82b854e  lean/lakefile.toml
 d5edba4e4b8faad9c1baeadb265716d20d03be4d1a2647dc5e35b0c0325bea7b  lean/lean-toolchain
 # 2026-10-24 Línea base (archivos del commit 9e3614d, 8 oct). lake build con el toolchain oficial leanprover/lean4:v4.34.1 (aarch64, commit 5045d00): OK. 17 teoremas; #print axioms solo [propext, Classical.choice, Quot.sound]; sin sorryAx ni Lean.ofReduceBool. Confirma la verificación del 8 oct (stage0 armado a mano). Detalle: lake_build_2026-10-24.txt
+# 2026-11-11 R31: nuevo lean/VelveteenDrawdown.lean (freno por drawdown con ventana de W sesiones: seguridad window_halt_blocks_buy, vivacidad window_halt_releases, contraejemplo r31_all_time_never_releases) y lakefile.toml con su lean_lib. VelveteenRisk.lean sin cambios. lake build v4.34.1 (x86_64, commit 5045d00): OK; #print axioms solo [propext, Classical.choice, Quot.sound]; sin sorry. Detalle: lake_build_2026-11-11.txt

@@ -252,10 +252,19 @@ def evaluate(
         v.reasons.append("BUY rejected: no capital allocated to the satellite (or it is spent).")
         return v
 
+    # Freno por drawdown. ctx.peak_equity es el máximo de la VENTANA de
+    # sesiones (R31, Journal.update_window_peak), no el histórico. Fail-closed
+    # (B3): con un pico o un valor no finito no se compra (NaN haría False la
+    # comparación y la compra saldría).
     current = ctx.current_value if ctx.current_value is not None else equity
+    if not _finite(current) or (ctx.peak_equity is not None and not _finite(ctx.peak_equity)):
+        v.reasons.append("BUY rejected: drawdown halt cannot be evaluated "
+                         "(non-finite satellite value or peak) — new buys halted.")
+        return v
     if ctx.peak_equity and current < ctx.peak_equity * (1 - limits.max_drawdown_halt_pct):
         v.reasons.append(
-            f"BUY rejected: portfolio drawdown beyond {limits.max_drawdown_halt_pct:.0%} — new buys halted."
+            f"BUY rejected: portfolio drawdown beyond {limits.max_drawdown_halt_pct:.0%} "
+            f"of the {limits.drawdown_window_sessions}-session peak — new buys halted."
         )
         return v
 

@@ -53,7 +53,7 @@ Esto hay que decirlo explícitamente en cualquier artículo o charla:
 1. **Floats.** Python usa dobles IEEE-754 y Lean usa ℚ. Para cubrir esa brecha están los tests `tests/test_risk_cycle.py`, que corren los mismos invariantes sobre el código real en 300 ciclos aleatorios, con tolerancia relativa de 1e-9. El paso siguiente sería portar la puerta a `Decimal` o demostrar cotas de error de punto flotante.
 2. **Fidelidad del modelo.** El modelo Lean está escrito a mano a partir de `risk.py`, y la correspondencia se establece por inspección y por los tests diferenciales. No hay extracción mecánica. Ese es el eslabón débil, y es justo el problema de *fidelidad del enunciado* de la tesis.
 3. **Ejecución.** Se supone que las órdenes se llenan al cierre de referencia. Un gap que atraviese el stop, el slippage o la diferencia entre el cierre y el precio de llenado al abrir quedan fuera de `stop_loss_le_budget`.
-4. **Filtros que solo rechazan.** El halt por drawdown y el filtro de CVaR se abstraen como el booleano `vetoed`. Como solo pueden rechazar, no afectan los invariantes.
+4. **Filtros que solo rechazan.** El halt por drawdown y el filtro de CVaR se abstraen como el booleano `vetoed`. Como solo pueden rechazar, no afectan los invariantes. Desde el 11 nov 2026 (R31) el freno por drawdown tiene modelo propio en `lean/VelveteenDrawdown.lean`: ver §9.
 5. **Rentabilidad.** Nada de esto dice que la estrategia gane dinero. Dice que, gane o pierda, lo hace dentro de los límites declarados.
 
 ## 5. Cómo correrlo
@@ -108,3 +108,22 @@ Arreglos en la rama `fix/b2-b8-sombra` (un commit por bug; los tests de reproduc
 Sobre el §5.1 («Floats»): D5 cierra las dos hipótesis de redondeo y B3 cierra los NaN. Queda la aritmética interna de `evaluate` en floats.
 
 Lean: `lake build` con el toolchain oficial v4.34.1 confirma la verificación del 8 oct (ver `lake_build_2026-10-24.txt` y `SHA256SUMS`). Los enunciados de la ronda 2, ajustados a estos arreglos, están propuestos y demostrados fuera del repo; entran a `lean/` solo cuando se aprueben.
+
+## 9. Actualización del 11 nov 2026: freno por drawdown con ventana (R31)
+
+**El problema (R31).** El freno comparaba el valor del satélite con su pico HISTÓRICO. Después de un stop a efectivo el valor queda plano, no puede volver al pico y el freno no se soltaba nunca: exposición 0 para siempre. `r31_all_time_never_releases` lo demuestra con números (pico 1000, efectivo en 850, umbral 10 %).
+
+**El arreglo.** El pico es el máximo de las últimas `W` sesiones con registro (`Journal.update_window_peak`, tabla `session_peaks`), `W = risk.drawdown_window_sessions` en `config.yaml`. Por defecto 126 (≈ 6 meses bursátiles). **El valor es provisional: lo decide Carlos.**
+
+**Teoremas** (`lean/VelveteenDrawdown.lean`, sin `sorry`, axiomas estándar):
+
+| Teorema | Dice |
+|---|---|
+| `window_halt_blocks_buy` | Seguridad: con el freno de la ventana puesto, `step` rechaza toda compra (cualquier propuesta, cualquier cartera). |
+| `halted_iff_drawdown` | El freno puesto equivale a una caída mayor que `θ` sobre el pico de la ventana. |
+| `window_halt_releases` | Vivacidad: si en las `W` sesiones el valor de hoy no cae más que `θ` respecto a ninguna, el freno está suelto. |
+| `flat_window_releases` | `W` sesiones con valor plano (efectivo) sueltan el freno, sea cual sea la historia anterior. |
+| `r31_all_time_never_releases` | Contraejemplo del freno anterior: frenado en toda sesión posterior. |
+| `r31_window_releases` | La misma serie con ventana: suelto desde la sesión `W`. |
+
+**No cubre:** un valor por sesión (el código guarda el máximo de los ciclos de cada sesión, lo que solo puede hacer el pico mayor: más conservador); la reconstrucción de la ventana desde `equity_history` y el reinicio por base nueva se prueban en Python (`tests/test_r31_freno_ventana.py`). Compilación: `lake_build_2026-11-11.txt`.

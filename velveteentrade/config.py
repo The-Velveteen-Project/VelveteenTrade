@@ -28,9 +28,25 @@ class RiskLimits:
     stop_atr_mult: float = 2.0
     max_daily_turnover_pct: float = 0.25  # max fraction of equity traded per trading SESSION (all cycles; B2)
     max_drawdown_halt_pct: float = 0.10   # halt new BUYs beyond this peak-to-trough drawdown
+    # R31: el pico del freno es el máximo de las últimas N sesiones (no el
+    # histórico, que dejaba el freno puesto para siempre tras quedar en
+    # efectivo). 126 ≈ medio año bursátil. Valor por defecto PROVISIONAL: lo
+    # decide Carlos (config.yaml, risk.drawdown_window_sessions).
+    drawdown_window_sessions: int = 126
     min_conviction: int = 3               # decisions below this are logged, not traded
     max_cvar_95_20d: float = -0.25        # reject symbols whose empirical 20d CVaR is worse than this
     max_sector_exposure_pct: float = 0.30 # max fraction of equity in one sector
+
+    def __post_init__(self) -> None:
+        check_window(self.drawdown_window_sessions)
+
+
+def check_window(window: object) -> int:
+    """La ventana del freno (R31) debe ser un entero >= 1. Un valor inválido
+    detiene el arranque: nunca se adivina un freno."""
+    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        raise ValueError(f"drawdown_window_sessions debe ser un entero >= 1 (recibido: {window!r})")
+    return window
 
 
 @dataclass

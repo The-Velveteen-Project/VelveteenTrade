@@ -20,7 +20,8 @@ and each job needed a different one:
 The base (S and the account equity it started from) is re-set whenever the
 profile's capital or core weight changes, and the drawdown peak restarts in
 the new base (B6c: a peak from the full account compared against a $200
-capital halted buys forever).
+capital halted buys forever). Within a base the peak is the maximum of the
+last N sessions, not the all-time one (R31, Journal.update_window_peak).
 
 Known limit: deposits and withdrawals in the broker account are counted as
 P&L of the satellite. On a paper account there are none; for real money the
@@ -90,7 +91,9 @@ def resolve(journal: Journal, profile: RiskProfile | None, account_equity: float
         if not legacy:
             # New base, new peak. (The one exception: first run of this code
             # with no profile, where the old peak is in the same base.)
-            journal.set_float("peak_equity", allocated)
+            # R31: también se vacía la ventana del pico (sesiones de la base
+            # anterior no se comparan con la nueva).
+            journal.reset_window_peak(allocated)
     allocated = float(base["allocated"])
     value = allocated + (float(account_equity) - float(base["start_equity"]))
     sizing = max(0.0, min(value, allocated, float(account_equity)))

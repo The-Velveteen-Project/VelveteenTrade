@@ -45,6 +45,10 @@ risk:
   stop_atr_mult: 2.0
   max_daily_turnover_pct: 0.25
   max_drawdown_halt_pct: 0.10
+  # R31: el freno mide la caída contra el máximo de las últimas N sesiones
+  # (antes: el máximo histórico, y el freno nunca se soltaba). 126 ≈ 6 meses.
+  # Valor provisional: lo decide Carlos. Entero >= 1.
+  drawdown_window_sessions: 126
   min_conviction: 3
   max_cvar_95_20d: -0.25
   max_sector_exposure_pct: 0.30
