@@ -77,7 +77,7 @@ The suite covers the indicator math, every risk-gate rule, the cycle-level invar
 
 ## Scheduling
 
-`.github/workflows/daily.yml` runs the cycle on weekdays after US market close. Add `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, and `OPENAI_API_KEY` as repository secrets to enable it, and commit `journal.db` storage or swap it for a hosted DB if you want history across runs (a VPS with cron is the better home once the system matures).
+The only scheduler is the Telegram bot (see *Cloud deploy (Railway)* below): it runs the cycle on weekdays after US market close, with the journal on a persistent volume. There is no scheduled GitHub workflow; `.github/workflows/tests.yml` only runs the test suite and needs no secrets. Do not add broker or LLM keys as repository secrets: `python -m velveteentrade run` refuses to trade inside GitHub Actions (only `--dry-run` is allowed there), so a second scheduler cannot double the bot's cycle on the same account.
 
 ## Roadmap
 

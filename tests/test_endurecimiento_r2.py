@@ -184,3 +184,20 @@ def test_en_el_piso_toda_compra_llega_al_minimo(tmp_path, paper):
         if not v.approved:
             rechazos.append((px, v.reasons))
     assert rechazos == [], f"piso {lo}"
+
+
+# ------------------------------------------------------------- README
+def test_readme_no_cita_workflows_ni_secretos_que_no_existen():
+    """R20 borró daily.yml; el README público no debe describirlo ni pedir que
+    se suban llaves del bróker como secretos del repo."""
+    from pathlib import Path
+
+    raiz = Path(__file__).resolve().parents[1]
+    readme = (raiz / "README.md").read_text(encoding="utf-8")
+    workflows = {p.name for p in (raiz / ".github" / "workflows").glob("*.yml")}
+    import re
+    citados = set(re.findall(r"\.github/workflows/([\w.-]+\.yml)", readme))
+    assert citados <= workflows, f"README cita workflows inexistentes: {citados - workflows}"
+    if "daily.yml" not in workflows:
+        assert "as repository secrets to enable" not in readme
+        assert "Telegram bot" in readme and "only scheduler" in readme
