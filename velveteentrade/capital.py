@@ -68,6 +68,18 @@ def _fingerprint(profile: RiskProfile | None, allocation: Allocation | None = No
     return {"capital": cap, "core": float(etf_core_weight(profile))}
 
 
+def working_capital(allocation: Allocation | None, profile: RiskProfile | None,
+                    paper: bool = True) -> float | None:
+    """Capital de trabajo que muestran /estado, /informe, el chat y el track
+    record. En separate_account es el satélite que de verdad opera el motor
+    (total x pct); el capital del perfil ya no dimensiona nada y mostrarlo
+    contradecía la cifra del satélite. En modo "profile", el capital declarado."""
+    s = allocation.satellite_capital(paper) if allocation is not None else None
+    if s is not None:
+        return s
+    return profile.capital if profile else None
+
+
 def current_base(journal: Journal) -> dict | None:
     """The base in force: {'allocated', 'start_equity', 'since', 'fp'}, or None."""
     stored = journal.get_str(_KEY)

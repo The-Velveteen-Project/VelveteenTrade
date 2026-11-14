@@ -199,8 +199,10 @@ def cmd_report(settings) -> None:
     from .report import write_report
 
     prof = profile_mod.load(settings.profile_path)
+    from .capital import working_capital
+
     out = write_report(Journal(settings.db_path),
-                       prof.capital if prof else None,
+                       working_capital(settings.allocation, prof, settings.alpaca_paper),
                        Path(ROOT) / "docs" / "index.html")
     print(f"Track record generado: {out}")
     print("Publícalo con GitHub Pages: Settings → Pages → branch main, carpeta /docs.")

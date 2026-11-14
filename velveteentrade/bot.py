@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 
+from . import capital as capital_mod
 from . import profile as profile_mod
 from .advisor import explain_plan, extract_profile, interview
 from .broker import AlpacaBroker
@@ -287,14 +288,14 @@ def run_bot(settings: Settings) -> None:
         prof = profile_mod.load(settings.profile_path)
         context_note = (f"[Contexto: el usuario tiene perfil guardado — {prof.name}, "
                         f"tolerancia efectiva {profile_mod.effective_tolerance(prof)}/5, "
-                        f"capital ${prof.capital or 'n/d'}]"
+                        f"capital de trabajo ${capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper) or 'n/d'}]"
                         if prof else "[Contexto: el usuario aún no tiene perfil — sugiérele /start]")
         # The chat must see the REAL system state — an advisor that improvises
         # numbers or claims "no trades today" blindly is worse than no advisor.
         try:
             snapshot = await asyncio.to_thread(
                 format_informe, _broker(), Journal(settings.db_path),
-                prof.capital if prof else None)
+                capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper))
             context_note += ("\n[Estado real del sistema ahora mismo — usa ESTOS datos, "
                              "no inventes cifras ni pidas comandos:]\n" + snapshot)
         except Exception as exc:  # noqa: BLE001
@@ -349,7 +350,7 @@ def run_bot(settings: Settings) -> None:
     async def estado(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         prof = profile_mod.load(settings.profile_path)
         await update.message.reply_text(
-            format_estado(_broker(), journal, prof.capital if prof else None))
+            format_estado(_broker(), journal, capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper)))
 
     async def informe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         import asyncio
@@ -357,7 +358,7 @@ def run_bot(settings: Settings) -> None:
         prof = profile_mod.load(settings.profile_path)
         text = await asyncio.to_thread(
             format_informe, _broker(), Journal(settings.db_path),
-            prof.capital if prof else None)
+            capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper))
         await _send_long(ctx.bot, update.effective_chat.id, text)
 
     def _cycle_in_thread():

@@ -253,11 +253,36 @@ def test_estado_does_not_call_cash_a_core(tmp_path):
 
     j = journal(tmp_path)
     capital.resolve(j, perfil_t1(), 100_000.0, allocation=Allocation(**SEP))
-    txt = format_estado(MockBroker(equity=100_000), j, 200.0)
+    wc = capital.working_capital(Allocation(**SEP), perfil_t1(), paper=True)
+    txt = format_estado(MockBroker(equity=100_000), j, wc)
     assert "no lo opera" in txt and "núcleo de ETF" not in txt
     j2 = journal(tmp_path, "k.db")
     capital.resolve(j2, perfil_t1(), 100_000.0)
     assert "núcleo de ETF" in format_estado(MockBroker(equity=100_000), j2, 150.0)
+
+
+def test_working_capital_matches_the_satellite_the_engine_operates(tmp_path):
+    """Hallazgo 11 del endurecimiento: con separate_account, /estado, /informe,
+    el chat y el track record mostraban el capital del perfil junto a un
+    satélite de $2.000. La cifra de capital de trabajo es ahora la del motor."""
+    from velveteentrade.bot import format_estado, format_informe
+    from velveteentrade.report import generate
+
+    a = Allocation(**SEP)
+    wc = capital.working_capital(a, perfil_t1(), paper=True)
+    assert wc == pytest.approx(2_000.0)
+    assert capital.working_capital(a, None, paper=False) == pytest.approx(1_000.0)
+    assert capital.working_capital(None, perfil_t1()) == 150.0            # modo profile
+    assert capital.working_capital(Allocation(), perfil_t1()) == 150.0
+
+    j = journal(tmp_path)
+    antes = format_estado(MockBroker(equity=100_000), j, wc)               # sin base aún
+    assert "$2,000.00" in antes and "$150.00" not in antes
+    assert "Capital de trabajo: $2,000.00" in format_informe(MockBroker(equity=100_000), j, wc)
+    assert "capital de trabajo $2,000.00" in generate(j, wc)
+    b = capital.resolve(j, perfil_t1(), 100_000.0, allocation=a)
+    despues = format_estado(MockBroker(equity=100_000), j, wc)
+    assert b.allocated == pytest.approx(wc) and "$150.00" not in despues
 
 
 # ------------------------------------------------------- ciclo único (daily.yml)
