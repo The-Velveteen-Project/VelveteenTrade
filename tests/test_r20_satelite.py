@@ -344,3 +344,19 @@ def test_paper_to_live_rebases_even_if_satellite_amount_matches(tmp_path):
     assert b2.allocated == pytest.approx(2_000.0)
     assert b2.value == pytest.approx(2_000.0) and b2.sizing == pytest.approx(2_000.0)
     assert capital.current_base(j)["fp"]["paper"] is False
+
+
+def test_total_capital_from_service_variable(tmp_path, monkeypatch):
+    """Endurecimiento R3: con dinero real el total real no tiene que ir al
+    config.yaml del repo público. SATELLITE_TOTAL_CAPITAL (variable de servicio
+    de Railway) manda sobre config.yaml; sin ella rige config.yaml."""
+    monkeypatch.delenv("SATELLITE_TOTAL_CAPITAL", raising=False)
+    assert load_settings().allocation.total_capital == pytest.approx(10_000.0)
+    monkeypatch.setenv("SATELLITE_TOTAL_CAPITAL", "55555")
+    s = load_settings()
+    assert s.allocation.total_capital == pytest.approx(55_555.0)
+    assert s.allocation.satellite_capital(paper=False) == pytest.approx(5_555.5)
+    for malo in ("20.000", "1,5", "abc", "-5", "0"):
+        monkeypatch.setenv("SATELLITE_TOTAL_CAPITAL", malo)
+        with pytest.raises(ValueError):
+            load_settings()

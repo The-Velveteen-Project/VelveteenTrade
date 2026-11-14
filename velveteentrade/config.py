@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -174,7 +175,17 @@ def load_settings(path: Path | None = None) -> Settings:
     raw = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
     risk = RiskLimits(**raw.get("risk", {}))
     models = Models(**raw.get("models", {}))
-    allocation = Allocation(**(raw.get("allocation") or {}))
+    alloc_raw = dict(raw.get("allocation") or {})
+    env_total = os.environ.get("SATELLITE_TOTAL_CAPITAL", "").strip()
+    if env_total:
+        # Con dinero real el total real va en esta variable de servicio, no en
+        # el config.yaml del repo público. Solo dígitos y hasta dos decimales:
+        # "20.000" (punto de miles) se rechaza en vez de leerse como 20.
+        if not re.fullmatch(r"[0-9]+(\.[0-9]{1,2})?", env_total):
+            raise ValueError("SATELLITE_TOTAL_CAPITAL debe ser un número en USD sin separador "
+                             f"de miles, p. ej. 20000 (recibido: {env_total!r})")
+        alloc_raw["total_capital"] = float(env_total)
+    allocation = Allocation(**alloc_raw)
     return Settings(
         universe=raw.get("universe", []),
         candidates_per_cycle=raw.get("candidates_per_cycle", 5),

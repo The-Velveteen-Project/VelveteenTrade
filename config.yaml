@@ -63,7 +63,8 @@ risk:
 allocation:
   mode: separate_account
   # USD, núcleo + satélite. PROVISIONAL: 8.000 del núcleo paper / 0,80 = 10.000.
-  # Lo fija el mantenedor; para dinero real debe ser el total real.
+  # Con dinero real el total real NO va aquí (el repo es público): se define en
+  # la variable de servicio SATELLITE_TOTAL_CAPITAL, que manda sobre este valor.
   total_capital: 10000
   satellite_pct_paper: 0.20
   satellite_pct_live: 0.10
