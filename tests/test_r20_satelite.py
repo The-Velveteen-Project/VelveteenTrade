@@ -103,7 +103,9 @@ def test_satellite_floor_matches_risk_and_profile_constants():
     assert cfgmod.SATELLITE_MIN_ORDER_USD == risk.MIN_ORDER_NOTIONAL
     assert cfgmod.SATELLITE_MIN_POSITION_PCT == min(
         row["max_position_pct"] for row in pm._TOLERANCE_TABLE.values())
-    Allocation(**{**SEP, "total_capital": 200.0})        # en el piso: S real = $20, 5 % = $1
+    Allocation(**{**SEP, "total_capital": 400.0})        # en el piso: S real = $40, 5 % = $2
+    with pytest.raises(ValueError):                      # 200: tope de $1 exacto (endurecimiento R2)
+        Allocation(**{**SEP, "total_capital": 200.0})
 
 
 def test_invalid_allocation_in_yaml_stops_startup(tmp_path):

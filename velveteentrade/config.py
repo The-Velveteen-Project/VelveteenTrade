@@ -73,8 +73,16 @@ SATELLITE_PCT_MAX = 0.20   # §4 de la torre: el satélite nunca pasa del 20 % d
 # de la tabla de perfiles (5 %), el satélite debe poder abrir una orden de al
 # menos el mínimo del bróker (risk.MIN_ORDER_NOTIONAL = $1). Atrapa, por ejemplo,
 # "10.000" escrito con punto de miles, que YAML lee como 10.0.
+# Endurecimiento R2: risk._round_qty baja la cantidad a milésimas de acción, así
+# que el nocional puede quedar hasta 0,001 x precio bajo el tope. Con un tope de
+# exactamente $1 (total 200 en real) 2 de 5 precios redondos se rechazaban. El
+# tope por posición debe cubrir el mínimo más ese redondeo para precios de hasta
+# SATELLITE_MAX_PRICE_USD; por encima de ese precio la garantía no vale.
 SATELLITE_MIN_POSITION_PCT = 0.05
 SATELLITE_MIN_ORDER_USD = 1.0
+SATELLITE_QTY_STEP = 0.001
+SATELLITE_MAX_PRICE_USD = 1_000.0
+SATELLITE_MIN_POSITION_USD = SATELLITE_MIN_ORDER_USD + SATELLITE_QTY_STEP * SATELLITE_MAX_PRICE_USD
 
 
 @dataclass
@@ -110,11 +118,12 @@ class Allocation:
                 raise ValueError("allocation.total_capital debe ser un número finito > 0 "
                                  f"con mode=separate_account (recibido: {cap!r})")
             pct = min(self.satellite_pct_paper, self.satellite_pct_live)
-            if cap * pct * SATELLITE_MIN_POSITION_PCT < SATELLITE_MIN_ORDER_USD:
-                piso = SATELLITE_MIN_ORDER_USD / (pct * SATELLITE_MIN_POSITION_PCT)
+            if cap * pct * SATELLITE_MIN_POSITION_PCT < SATELLITE_MIN_POSITION_USD:
+                piso = SATELLITE_MIN_POSITION_USD / (pct * SATELLITE_MIN_POSITION_PCT)
                 raise ValueError(
                     f"allocation.total_capital = {cap!r} deja un satélite de ${cap * pct:,.2f}: "
-                    f"ninguna orden llegaría al mínimo de ${SATELLITE_MIN_ORDER_USD:.0f}. "
+                    f"tras redondear a milésimas de acción, una orden podría no llegar al "
+                    f"mínimo de ${SATELLITE_MIN_ORDER_USD:.0f}. "
                     f"Debe ser al menos {piso:,.0f}. ¿Escribiste los miles con punto "
                     "(10.000 se lee como 10.0)? Escríbelo sin separador: 10000.")
 

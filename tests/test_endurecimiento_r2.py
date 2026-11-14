@@ -141,3 +141,46 @@ def test_marca_sobre_el_cierre_no_cambia_nada(tmp_path):
                           positions={"A": Position("A", 100.0, 100.0, 10_000.0)})
     v = risk.check_stops(cuenta, {"A": snap("A", close=95.0)}, RiskLimits(), {}, stops={"A": 96.0})
     assert len(v) == 1 and "broker mark" not in v[0].reasons[0]
+
+
+# ------------------------------------------------- piso de total_capital
+@pytest.mark.parametrize("paper", [True, False])
+def test_en_el_piso_toda_compra_llega_al_minimo(tmp_path, paper):
+    """En el piso de total_capital, con el perfil más estricto (tope 5 %), una
+    compra a cualquier precio de hasta SATELLITE_MAX_PRICE_USD pasa la puerta.
+    Antes el piso era 200: en real, tope $1 y 2 de 5 precios redondos rechazados."""
+    from velveteentrade import capital, profile as pm
+    from velveteentrade.config import Allocation
+    from velveteentrade.profile import RiskProfile
+    from velveteentrade.schemas import ExecutiveDecision, TechnicalSnapshot
+
+    prof = RiskProfile(name="U", tolerance=1, horizon_years=10, experience="INTERMEDIATE",
+                       max_drawdown_comfort=0.20, income_stability="VARIABLE",
+                       has_emergency_fund=True, has_high_interest_debt=False, capital=150.0)
+    lim = pm.limits_for(prof, window=126)
+    assert lim.max_position_pct == 0.05
+    def acepta(t):
+        try:
+            Allocation(mode="separate_account", total_capital=float(t))
+            return True
+        except ValueError:
+            return False
+
+    lo, hi = 1, 100_000                       # el piso que de verdad aplica la guarda
+    while lo < hi:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if acepta(mid) else (mid + 1, hi)
+    a = Allocation(mode="separate_account", total_capital=float(lo))
+    b = capital.resolve(Journal(tmp_path / "j.db"), prof, 100_000.0, allocation=a, paper=paper)
+    precios = (20.0, 23.17, 48.9, 50.0, 101.37, 173.42, 300.0, 412.05, 600.0, 999.99,
+               1_000.0)
+    rechazos = []
+    for px in precios:
+        d = ExecutiveDecision(symbol="X", action="BUY", conviction=5, thesis="t",
+                              invalidation="i", horizon_days=10)
+        s = TechnicalSnapshot(symbol="X", close=px, atr_14=0.02 * px, hist_cvar_95_20d=-0.05)
+        v = risk.evaluate(d, s, AccountState(equity=b.sizing, cash=b.sizing), lim,
+                          risk.CycleContext())
+        if not v.approved:
+            rechazos.append((px, v.reasons))
+    assert rechazos == [], f"piso {lo}"
