@@ -30,6 +30,7 @@ class RiskLimits:
     stop_atr_mult: float = 2.0
     max_daily_turnover_pct: float = 0.25  # max fraction of equity traded per trading SESSION (all cycles; B2)
     max_drawdown_halt_pct: float = 0.10   # halt new BUYs beyond this peak-to-trough drawdown
+    # El umbral sale de config.yaml aunque exista un perfil (profile.CONFIG_OWNED).
     # R31: el pico del freno es el máximo de las últimas N sesiones (no el
     # histórico, que dejaba el freno puesto para siempre tras quedar en
     # efectivo). 126 ≈ medio año bursátil. Valor por defecto PROVISIONAL: lo

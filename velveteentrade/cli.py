@@ -97,7 +97,7 @@ def cmd_profile(settings) -> None:
     if prof is None:
         print("Sin perfil. Corre: python -m velveteentrade advisor")
         return
-    limits = profile_mod.limits_for(prof, window=settings.risk.drawdown_window_sessions)
+    limits = profile_mod.gate_limits(prof, settings.risk)
     eff = profile_mod.effective_tolerance(prof)
     print(f"Perfil: {prof.name} | tolerancia declarada {prof.tolerance}/5 → efectiva {eff}/5")
     print(f"Horizonte: {prof.horizon_years} años | experiencia: {prof.experience} | "

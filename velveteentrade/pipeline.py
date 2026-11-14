@@ -134,9 +134,10 @@ def _run_cycle(
     from . import capital as capital_mod
     from . import profile as profile_mod
 
+    # W (R31) y el umbral del freno salen de config.yaml, no del perfil
+    # (profile.CONFIG_OWNED).
     prof = profile_mod.load(settings.profile_path)
-    window = settings.risk.drawdown_window_sessions   # R31: de config.yaml, no del perfil
-    limits = profile_mod.limits_for(prof, window=window) if prof else settings.risk
+    limits = profile_mod.gate_limits(prof, settings.risk)
 
     # Capital base (B6/B8, see capital.py): size against the satellite the
     # user allocated (E); track record and drawdown halt read what it is

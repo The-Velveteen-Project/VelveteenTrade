@@ -114,7 +114,7 @@ def extract_profile(llm: StructuredLLM, model: str, transcript: list[dict]) -> R
 
 def explain_plan(llm: StructuredLLM, model: str, prof: RiskProfile,
                  settings: Settings) -> str:
-    limits = profile_mod.limits_for(prof, window=settings.risk.drawdown_window_sessions)
+    limits = profile_mod.gate_limits(prof, settings.risk)
     from . import capital as capital_mod
 
     sp = capital_mod.split(prof, settings.allocation, settings.alpaca_paper)
