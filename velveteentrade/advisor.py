@@ -115,7 +115,14 @@ def extract_profile(llm: StructuredLLM, model: str, transcript: list[dict]) -> R
 def explain_plan(llm: StructuredLLM, model: str, prof: RiskProfile,
                  settings: Settings) -> str:
     limits = profile_mod.limits_for(prof, window=settings.risk.drawdown_window_sessions)
-    core = profile_mod.etf_core_weight(prof)
+    from . import capital as capital_mod
+
+    sp = capital_mod.split(prof, settings.allocation, settings.alpaca_paper)
+    if sp["mode"] == "separate_account":
+        reparto = (f"núcleo ETF en otra cuenta; esta cuenta es 100 % satélite gestionado "
+                   f"(${sp['capital']:,.0f})")
+    else:
+        reparto = f"núcleo ETF {sp['core']:.0%} / satélite gestionado {1 - sp['core']:.0%}"
     retriever = Retriever(settings.rag_db_path)
     canon = retriever.excerpts(
         "why disciplined low-cost diversified investing beats frequent trading for individuals; "
@@ -124,7 +131,7 @@ def explain_plan(llm: StructuredLLM, model: str, prof: RiskProfile,
     payload = (
         f"PERFIL:\n{prof.model_dump_json(indent=2)}\n\n"
         f"TOLERANCIA EFECTIVA (calculada por el sistema): {profile_mod.effective_tolerance(prof)}/5\n"
-        f"REPARTO: núcleo ETF {core:.0%} / satélite gestionado {1 - core:.0%}\n"
+        f"REPARTO: {reparto}\n"
         f"LÍMITES FIJADOS: máx {limits.max_position_pct:.0%} por posición, "
         f"máx {limits.max_positions} posiciones, máx {limits.max_sector_exposure_pct:.0%} por sector, "
         f"riesgo por operación {limits.per_trade_risk_pct:.1%} del capital, "

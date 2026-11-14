@@ -1,6 +1,7 @@
 """Configuration: config.yaml (strategy/universe/risk) + .env (secrets)."""
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,6 +67,51 @@ def check_window(window: object) -> int:
     return window
 
 
+ALLOCATION_MODES = ("profile", "separate_account")
+SATELLITE_PCT_MAX = 0.20   # §4 de la torre: el satélite nunca pasa del 20 % del total
+
+
+@dataclass
+class Allocation:
+    """Reparto núcleo/satélite (R20).
+
+    - "profile" (comportamiento anterior): el núcleo de ETF vive en ESTA cuenta
+      y su peso sale de la tabla del perfil (`etf_core_weight`); el motor opera
+      (1 - peso) x capital declarado.
+    - "separate_account": el núcleo vive en OTRA cuenta, así que esta cuenta es
+      100 % satélite. El motor opera `total_capital` x pct, con pct =
+      `satellite_pct_paper` en paper y `satellite_pct_live` con dinero real.
+
+    Un valor inválido detiene el arranque: nunca se adivina un presupuesto."""
+
+    mode: str = "profile"
+    total_capital: float | None = None
+    satellite_pct_paper: float = 0.20
+    satellite_pct_live: float = 0.10
+
+    def __post_init__(self) -> None:
+        if self.mode not in ALLOCATION_MODES:
+            raise ValueError(f"allocation.mode debe ser uno de {ALLOCATION_MODES} (recibido: {self.mode!r})")
+        for name in ("satellite_pct_paper", "satellite_pct_live"):
+            pct = getattr(self, name)
+            if isinstance(pct, bool) or not isinstance(pct, (int, float)) \
+                    or not (0 < pct <= SATELLITE_PCT_MAX):
+                raise ValueError(f"allocation.{name} debe estar en (0, {SATELLITE_PCT_MAX}] (recibido: {pct!r})")
+        if self.mode == "separate_account":
+            cap = self.total_capital
+            if isinstance(cap, bool) or not isinstance(cap, (int, float)) \
+                    or not math.isfinite(cap) or cap <= 0:
+                raise ValueError("allocation.total_capital debe ser un número finito > 0 "
+                                 f"con mode=separate_account (recibido: {cap!r})")
+
+    def satellite_capital(self, paper: bool) -> float | None:
+        """Presupuesto del satélite en USD, o None en modo "profile"."""
+        if self.mode != "separate_account":
+            return None
+        pct = self.satellite_pct_paper if paper else self.satellite_pct_live
+        return float(self.total_capital) * float(pct)
+
+
 @dataclass
 class Models:
     provider: str = os.getenv("LLM_PROVIDER", "openai")
@@ -88,6 +134,7 @@ class Settings:
     candidates_per_cycle: int = 5   # how many screened symbols get full LLM analysis
     history_days: int = 320
     risk: RiskLimits = field(default_factory=RiskLimits)
+    allocation: Allocation = field(default_factory=Allocation)
     models: Models = field(default_factory=Models)
     alpaca_key: str = os.getenv("ALPACA_API_KEY", "")
     alpaca_secret: str = os.getenv("ALPACA_SECRET_KEY", "")
@@ -104,10 +151,12 @@ def load_settings(path: Path | None = None) -> Settings:
     raw = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
     risk = RiskLimits(**raw.get("risk", {}))
     models = Models(**raw.get("models", {}))
+    allocation = Allocation(**(raw.get("allocation") or {}))
     return Settings(
         universe=raw.get("universe", []),
         candidates_per_cycle=raw.get("candidates_per_cycle", 5),
         history_days=raw.get("history_days", 320),
         risk=risk,
+        allocation=allocation,
         models=models,
     )

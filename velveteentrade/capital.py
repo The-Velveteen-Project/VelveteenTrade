@@ -23,6 +23,12 @@ the new base (B6c: a peak from the full account compared against a $200
 capital halted buys forever). Within a base the peak is the maximum of the
 last N sessions, not the all-time one (R31, Journal.update_window_peak).
 
+R20 (14 nov 2026): with `allocation.mode: separate_account` in config.yaml the
+ETF core lives in ANOTHER broker account, so this account is 100 % satellite:
+core weight 0 and declared capital = total_capital x satellite pct (20 % in
+paper, 10 % with real money). The profile still sets the limits, not the split.
+In mode "profile" nothing changes.
+
 Known limit: deposits and withdrawals in the broker account are counted as
 P&L of the satellite. On a paper account there are none; for real money the
 broker's cash-transfer activity should be subtracted.
@@ -33,6 +39,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .config import Allocation
 from .memory import Journal
 from .profile import RiskProfile, etf_core_weight
 
@@ -48,7 +55,13 @@ class CapitalBase:
     rebased: bool         # True if this call set a new base (peak restarts)
 
 
-def _fingerprint(profile: RiskProfile | None) -> dict:
+def _fingerprint(profile: RiskProfile | None, allocation: Allocation | None = None,
+                 paper: bool = True) -> dict:
+    sat = allocation.satellite_capital(paper) if allocation is not None else None
+    if sat is not None:
+        # R20: núcleo en otra cuenta. Mismo formato de huella, así que pasar de
+        # un modo a otro (o de paper a real) abre una base nueva (B6c).
+        return {"capital": float(sat), "core": 0.0}
     if profile is None:
         return {"capital": None, "core": 0.0}
     cap = None if profile.capital is None else float(profile.capital)
@@ -75,8 +88,17 @@ def pnl_since_base(journal: Journal) -> tuple[float, float, str | None] | None:
     return seg[0], seg[-1], since
 
 
-def resolve(journal: Journal, profile: RiskProfile | None, account_equity: float) -> CapitalBase:
-    fp = _fingerprint(profile)
+def split(profile: RiskProfile | None, allocation: Allocation | None = None,
+          paper: bool = True) -> dict:
+    """Reparto en vigor, para mostrarlo: {'mode', 'core', 'capital'}."""
+    fp = _fingerprint(profile, allocation, paper)
+    mode = allocation.mode if allocation is not None else "profile"
+    return {"mode": mode, "core": fp["core"], "capital": fp["capital"]}
+
+
+def resolve(journal: Journal, profile: RiskProfile | None, account_equity: float,
+            allocation: Allocation | None = None, paper: bool = True) -> CapitalBase:
+    fp = _fingerprint(profile, allocation, paper)
     stored = journal.get_str(_KEY)
     base = json.loads(stored) if stored else None
     rebased = base is None or base.get("fp") != fp

@@ -54,6 +54,20 @@ risk:
   max_cvar_95_20d: -0.25
   max_sector_exposure_pct: 0.30
 
+# R20: reparto núcleo/satélite. Decisión del mantenedor (12 nov 2026): el núcleo de
+# ETF vive en OTRA cuenta paper, así que esta cuenta es 100 % satélite. El
+# satélite es el 20 % del capital total en paper y el 10 % con dinero real
+# (sube al 20 % solo si bate a VTI neto de costos en 6-12 meses).
+#   mode: separate_account | profile (antes: núcleo del perfil en esta cuenta)
+# El perfil sigue fijando los límites de riesgo, no el reparto.
+allocation:
+  mode: separate_account
+  # USD, núcleo + satélite. PROVISIONAL: 8.000 del núcleo paper / 0,80 = 10.000.
+  # Lo fija el mantenedor; para dinero real debe ser el total real.
+  total_capital: 10000
+  satellite_pct_paper: 0.20
+  satellite_pct_live: 0.10
+
 models:
   provider: openai        # openai | anthropic — switch here or via LLM_PROVIDER env var
   # analyst: gpt-5-mini   # uncomment to override defaults

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 
 from .broker import AlpacaBroker, DryRunBroker
@@ -75,6 +76,20 @@ def cmd_advisor(settings) -> None:
     run_onboarding(settings, llm)
 
 
+def describe_split(prof, settings) -> str:
+    """Una línea con el reparto que de verdad usa el motor (R20)."""
+    from . import capital as capital_mod
+
+    sp = capital_mod.split(prof, settings.allocation, settings.alpaca_paper)
+    if sp["mode"] == "separate_account":
+        pct = (settings.allocation.satellite_pct_paper if settings.alpaca_paper
+               else settings.allocation.satellite_pct_live)
+        return (f"Reparto: núcleo ETF en otra cuenta; esta cuenta es 100 % satélite con "
+                f"${sp['capital']:,.2f} ({pct:.0%} de ${settings.allocation.total_capital:,.2f}, "
+                f"{'paper' if settings.alpaca_paper else 'real'})")
+    return f"Núcleo ETF: {sp['core']:.0%} (en esta misma cuenta, según el perfil)"
+
+
 def cmd_profile(settings) -> None:
     from . import profile as profile_mod
 
@@ -87,7 +102,7 @@ def cmd_profile(settings) -> None:
     print(f"Perfil: {prof.name} | tolerancia declarada {prof.tolerance}/5 → efectiva {eff}/5")
     print(f"Horizonte: {prof.horizon_years} años | experiencia: {prof.experience} | "
           f"fondo de emergencia: {'sí' if prof.has_emergency_fund else 'NO'}")
-    print(f"Núcleo ETF: {profile_mod.etf_core_weight(prof):.0%}")
+    print(describe_split(prof, settings))
     print(f"Límites activos: pos máx {limits.max_position_pct:.0%}, {limits.max_positions} posiciones, "
           f"sector {limits.max_sector_exposure_pct:.0%}, riesgo/op {limits.per_trade_risk_pct:.1%}, "
           f"freno drawdown {limits.max_drawdown_halt_pct:.0%} "
@@ -95,6 +110,13 @@ def cmd_profile(settings) -> None:
 
 
 def cmd_run(settings, dry_run: bool) -> None:
+    # R20: el único programador del ciclo es el bot (Railway, journal en /data).
+    # Un runner de GitHub Actions arranca con un journal vacío: sin stops
+    # congelados, sin turnover de la sesión y sin pico del freno, y su ciclo se
+    # sumaría al de Railway sobre la misma cuenta. Allí solo se permite --dry-run.
+    if os.getenv("GITHUB_ACTIONS", "").lower() == "true" and not dry_run:
+        sys.exit("R20: 'run' con órdenes no corre en GitHub Actions; el ciclo diario lo "
+                 "programa el bot de Railway. Usa --dry-run si solo quieres simular.")
     if not settings.alpaca_paper and not dry_run:
         confirm = input("Account is LIVE (not paper). Type 'LIVE' to continue: ")
         if confirm.strip() != "LIVE":

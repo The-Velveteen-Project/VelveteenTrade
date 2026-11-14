@@ -135,7 +135,10 @@ def _run_cycle(
     # user allocated (E); track record and drawdown halt read what it is
     # worth today (V), losses included — a $100k demo account trading like a
     # $200 one, honestly.
-    base = capital_mod.resolve(journal, prof, account.equity)
+    # R20: con allocation.mode = separate_account el núcleo vive en otra
+    # cuenta y esta es 100 % satélite (20 % del total en paper, 10 % en real).
+    base = capital_mod.resolve(journal, prof, account.equity,
+                               allocation=settings.allocation, paper=settings.alpaca_paper)
     if base.rebased:
         log.info("New capital base: satellite $%.2f (core %.0f%%, account $%.2f).",
                  base.allocated, base.core_weight * 100, account.equity)

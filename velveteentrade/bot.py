@@ -127,8 +127,12 @@ def format_estado(broker, journal: Journal, capital: float | None) -> str:
         from .capital import current_base
 
         base = current_base(journal)
+        # R20: con el núcleo en otra cuenta (huella core = 0) el resto de esta
+        # cuenta no es núcleo, es efectivo que el sistema no opera.
+        rest = ("el resto es tu núcleo de ETF" if base and (base.get("fp") or {}).get("core")
+                else "el resto de esta cuenta no lo opera")
         sat = (f"; el sistema opera solo el satélite: {_fmt_money(base['allocated'])} "
-               "(el resto es tu núcleo de ETF)") if base else " (el sistema opera solo con esto)"
+               f"({rest})") if base else " (el sistema opera solo con esto)"
         lines.append(f"Tu capital de trabajo: {_fmt_money(capital)}{sat}")
     if acct.positions:
         lines.append("\nPosiciones:")
