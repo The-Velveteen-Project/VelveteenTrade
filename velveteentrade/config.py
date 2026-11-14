@@ -41,11 +41,28 @@ class RiskLimits:
         check_window(self.drawdown_window_sessions)
 
 
+# Cotas de la ventana del freno (R31; R17 m2 y m3).
+# - Mínimo 2: con W = 1 el pico es el máximo de la sesión actual y, con un
+#   ciclo diario, ninguna caída entre sesiones pone el freno (queda inerte).
+#   W = 2 es el menor valor que compara contra la sesión anterior. Una cota
+#   más alta (p. ej. 20) sería una decisión de política, no de corrección.
+# - Máximo 2520 ≈ diez años bursátiles (252 sesiones por año). Por encima de
+#   2**63 - 1 sqlite3 no liga el entero y cada ciclo lanzaba OverflowError
+#   antes del barrido de stops; con la cota, el error sale al arrancar.
+#   memory.py conserva session_peaks hasta este horizonte, así que cambiar W
+#   dentro de [WINDOW_MIN, WINDOW_MAX] es reversible.
+WINDOW_MIN = 2
+WINDOW_MAX = 2520
+
+
 def check_window(window: object) -> int:
-    """La ventana del freno (R31) debe ser un entero >= 1. Un valor inválido
-    detiene el arranque: nunca se adivina un freno."""
-    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
-        raise ValueError(f"drawdown_window_sessions debe ser un entero >= 1 (recibido: {window!r})")
+    """La ventana del freno (R31) debe ser un entero en [WINDOW_MIN, WINDOW_MAX].
+    Un valor inválido detiene el arranque: nunca se adivina un freno."""
+    if (isinstance(window, bool) or not isinstance(window, int)
+            or window < WINDOW_MIN or window > WINDOW_MAX):
+        raise ValueError(
+            f"drawdown_window_sessions debe ser un entero entre {WINDOW_MIN} y {WINDOW_MAX} "
+            f"(recibido: {window!r})")
     return window
 
 

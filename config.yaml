@@ -47,7 +47,8 @@ risk:
   max_drawdown_halt_pct: 0.10
   # R31: el freno mide la caída contra el máximo de las últimas N sesiones
   # (antes: el máximo histórico, y el freno nunca se soltaba). 126 ≈ 6 meses.
-  # Valor provisional: lo decide Carlos. Entero >= 1.
+  # Valor provisional: lo decide el mantenedor. Entero entre 2 y 2520 (config.py,
+  # WINDOW_MIN y WINDOW_MAX); fuera de ese rango el bot no arranca.
   drawdown_window_sessions: 126
   min_conviction: 3
   max_cvar_95_20d: -0.25
