@@ -226,7 +226,11 @@ def _run_cycle(
         if broker.sends_orders:
             journal.book_turnover(session, order_id,
                                   verdict.qty * prices.get(verdict.symbol, float("inf")))
-            journal.clear_entry(verdict.symbol)
+            # The frozen stop stays until the position is gone: a SELL that is
+            # rejected, cancelled or only partly filled leaves the lot in the
+            # account, and without its stop check_stops would fall back to the
+            # moving entry - k*ATR stop that breaks G2. reconcile_entries clears
+            # entry and stop once the broker no longer reports the position.
         journal.record(JournalEntry(symbol=verdict.symbol, verdict=verdict, executed=True,
                                     note=f"stop-loss order {order_id}"))
         summary["stops"].append(verdict.symbol)
@@ -335,8 +339,8 @@ def _run_cycle(
                     if in_force != verdict.stop_price:
                         entry.note += (f"; frozen stop kept at {in_force} (tighten-only, "
                                        f"this lot's own stop {verdict.stop_price})")
-            else:
-                journal.clear_entry(symbol)
+            # SELL: entry and frozen stop are cleared by reconcile_entries once
+            # the position is gone, not here (the order may never fill).
             summary["orders"].append(f"{side.upper()} {symbol} x{verdict.qty}")
         else:
             summary["rejected"].append(f"{symbol}: {verdict.reasons[-1] if verdict.reasons else 'n/a'}")
