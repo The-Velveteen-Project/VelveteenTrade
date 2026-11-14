@@ -350,9 +350,9 @@ def check_stops(account: AccountState, snaps: dict[str, TechnicalSnapshot], limi
     Positions without a frozen stop (opened before this rule) fall back to
     `entries[symbol] - stop_atr_mult * ATR`.
 
-    Price (B3): today's close if finite, else the broker's own mark
-    (market_value / qty). A stop is never skipped because one data source is
-    blank; if NO valid price or stop exists the position is logged as
+    Price (B3): the lower of today's close and the broker's own mark
+    (market_value / qty), whichever are finite. A stop is never skipped
+    because one data source is blank or stale; if NO valid price or stop exists the position is logged as
     unchecked (and listed in `unchecked`, when a list is passed).
     """
     stops = stops or {}
@@ -360,8 +360,14 @@ def check_stops(account: AccountState, snaps: dict[str, TechnicalSnapshot], limi
     for symbol, pos in account.positions.items():
         snap = snaps.get(symbol)
         price = snap.close if snap is not None and _finite(snap.close) else None
-        if price is None and _finite(pos.market_value, pos.qty) and pos.qty:
-            price = abs(pos.market_value / pos.qty)
+        mark = (abs(pos.market_value / pos.qty)
+                if _finite(pos.market_value, pos.qty) and pos.qty else None)
+        # Endurecimiento R2: the close can be stale (bars cached for 12 h) while
+        # the broker already marks the position below its stop. Judge the stop
+        # with the LOWER of the two, so neither source can hide a hit.
+        used_mark = mark is not None and (price is None or mark < price)
+        if used_mark:
+            price = mark
         if symbol in stops and _finite(stops[symbol]):
             stop = stops[symbol]
         else:
@@ -379,8 +385,8 @@ def check_stops(account: AccountState, snaps: dict[str, TechnicalSnapshot], limi
                 RiskVerdict(
                     symbol=symbol, approved=True, action="SELL", qty=pos.qty,
                     reasons=[f"STOP hit: price {price} <= stop {round(stop, 2)}"
-                             + ("" if snap is not None and price == snap.close
-                                else " (broker mark; no valid close today)") + "."],
+                             + (" (broker mark, below today's close or no valid close)"
+                                if used_mark else "") + "."],
                 )
             )
     return verdicts

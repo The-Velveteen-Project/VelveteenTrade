@@ -104,3 +104,40 @@ def test_compras_y_ventas_no_se_confunden_con_un_split(tmp_path, q1, e1):
     j.set_stop("A", 96.0)
     j.reconcile_entries({"A": Position("A", q1, e1, q1 * e1)})
     assert j.stop_prices()["A"] == 96.0
+
+
+# ------------------------------------------------- caché de barras de 12 h
+def test_cierre_cacheado_no_tapa_la_marca_del_broker(tmp_path, monkeypatch):
+    import numpy as np
+    import pandas as pd
+
+    from velveteentrade import indicators
+    from velveteentrade.data import MarketData
+
+    def barras(ultimo):
+        idx = pd.bdate_range("2026-01-01", periods=60)
+        c = np.full(60, 100.0)
+        c[-1] = ultimo
+        return pd.DataFrame({"open": c, "high": c + 1, "low": c - 1, "close": c,
+                             "volume": 1e6}, index=idx)
+
+    md = MarketData("x", "y", tmp_path)
+    llamadas = []
+    monkeypatch.setattr(md, "_fetch_alpaca", lambda s, d: (llamadas.append(s), barras(100.0))[1])
+    md.daily_bars("A")                      # /ciclo a media sesión: se cachea 100
+    monkeypatch.setattr(md, "_fetch_alpaca", lambda s, d: (llamadas.append(s), barras(90.0))[1])
+    sn = indicators.snapshot("A", md.daily_bars("A"))   # 21:30 UTC: sale de la caché
+    assert llamadas == ["A"] and sn.close == 100.0
+    cuenta = AccountState(equity=EQ, cash=EQ - 9_000.0,
+                          positions={"A": Position("A", 100.0, 100.0, 9_000.0)})
+    v = risk.check_stops(cuenta, {"A": sn}, RiskLimits(), {"A": 100.0}, stops={"A": 96.0})
+    # Antes: el cierre cacheado (100) mandaba y no salía ninguna venta.
+    assert [(x.symbol, x.qty) for x in v] == [("A", 100.0)]
+    assert "broker mark" in v[0].reasons[0]
+
+
+def test_marca_sobre_el_cierre_no_cambia_nada(tmp_path):
+    cuenta = AccountState(equity=EQ, cash=0.0,
+                          positions={"A": Position("A", 100.0, 100.0, 10_000.0)})
+    v = risk.check_stops(cuenta, {"A": snap("A", close=95.0)}, RiskLimits(), {}, stops={"A": 96.0})
+    assert len(v) == 1 and "broker mark" not in v[0].reasons[0]
