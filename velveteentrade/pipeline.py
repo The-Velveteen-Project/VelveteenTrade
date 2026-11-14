@@ -32,6 +32,13 @@ class CycleInProgress(RuntimeError):
     """Raised instead of starting a cycle while another one is running."""
 
 
+class StopsNotSent(RuntimeError):
+    """Raised after the stop sweep when some stop sells could not be sent.
+
+    The sweep still sends every other stop first; the cycle then stops before
+    the gate, so no new buy goes out while a stop is pending by hand."""
+
+
 def _canon_queries(snap: TechnicalSnapshot, sector: str | None) -> dict[str, str]:
     """Deterministic, low-cardinality queries so embeddings cache well across symbols."""
     mom = "positive" if (snap.momentum_63d or 0) > 0 else "negative"
@@ -200,12 +207,21 @@ def _run_cycle(
     stop_verdicts = risk.check_stops(account, snaps, limits, entries,
                                      stops=journal.stop_prices(), unchecked=unchecked)
     summary["stops_unchecked"] = unchecked
+    stops_failed: list[str] = []
     for verdict in stop_verdicts:
         if verdict.symbol in pending_symbols:
             log.warning("Stop hit on %s but an order is already pending — not doubling.",
                         verdict.symbol)
             continue
-        order_id = broker.submit_order(verdict.symbol, verdict.qty, "sell")
+        # Endurecimiento R2: a broker exception on one stop must not keep the
+        # stops that come after it (in the stable order of account.positions)
+        # from going out — every cycle would cut at the same symbol.
+        try:
+            order_id = broker.submit_order(verdict.symbol, verdict.qty, "sell")
+        except Exception as exc:
+            log.error("STOP NOT SENT for %s: %s", verdict.symbol, exc)
+            stops_failed.append(f"{verdict.symbol} ({exc})")
+            continue
         ctx.mark_traded(verdict.symbol)
         if broker.sends_orders:
             journal.book_turnover(session, order_id,
@@ -214,6 +230,11 @@ def _run_cycle(
         journal.record(JournalEntry(symbol=verdict.symbol, verdict=verdict, executed=True,
                                     note=f"stop-loss order {order_id}"))
         summary["stops"].append(verdict.symbol)
+    if stops_failed:
+        raise StopsNotSent(
+            "stops sin enviar: " + ", ".join(stops_failed)
+            + ("; sí salieron: " + ", ".join(summary["stops"]) if summary["stops"] else "")
+            + ". Ninguna compra este ciclo; revisa esas posiciones a mano.")
 
     # ------------------------------------------------ 3. Candidate selection
     held_symbols = [s for s in account.positions if s in snaps and s not in summary["stops"]]
