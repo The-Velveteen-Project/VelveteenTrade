@@ -59,9 +59,12 @@ def _fingerprint(profile: RiskProfile | None, allocation: Allocation | None = No
                  paper: bool = True) -> dict:
     sat = allocation.satellite_capital(paper) if allocation is not None else None
     if sat is not None:
-        # R20: núcleo en otra cuenta. Mismo formato de huella, así que pasar de
-        # un modo a otro (o de paper a real) abre una base nueva (B6c).
-        return {"capital": float(sat), "core": 0.0}
+        # R20: núcleo en otra cuenta. La huella guarda también si la cuenta es
+        # paper o real: el satélite puede valer lo mismo en los dos modos
+        # (10 000 x 20 % = 20 000 x 10 %) y aun así son cuentas distintas, con
+        # otra equity de partida. Cambiar de modo, de producto o de paper a
+        # real abre una base nueva y vacía la ventana (B6c).
+        return {"capital": float(sat), "core": 0.0, "paper": bool(paper)}
     if profile is None:
         return {"capital": None, "core": 0.0}
     cap = None if profile.capital is None else float(profile.capital)

@@ -184,7 +184,7 @@ def test_switching_mode_or_paper_to_live_rebases(tmp_path):
     j.update_window_peak("2026-11-13", 15.0, 126)
     b1 = capital.resolve(j, perfil_t1(), 100_000.0, allocation=Allocation(**SEP))
     assert b1.rebased and b1.allocated == pytest.approx(2_000.0)
-    assert capital.current_base(j)["fp"] == {"capital": 2_000.0, "core": 0.0}
+    assert capital.current_base(j)["fp"] == {"capital": 2_000.0, "core": 0.0, "paper": True}
     b2 = capital.resolve(j, perfil_t1(), 100_000.0, allocation=Allocation(**SEP), paper=False)
     assert b2.rebased and b2.allocated == pytest.approx(1_000.0)
 
@@ -326,3 +326,21 @@ def test_run_refuses_on_github_actions(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cli.cmd_run(Settings(), dry_run=False)
     assert "R20" in str(exc.value)
+
+
+def test_paper_to_live_rebases_even_if_satellite_amount_matches(tmp_path):
+    """Endurecimiento R3: la huella guarda si la cuenta es paper o real.
+
+    Con total 10 000 en paper (20 %) y 20 000 en real (10 %) el satélite vale
+    2 000 en los dos modos. Antes la huella solo guardaba ese producto, así que
+    al pasar a real con equity 2 000 la base de la paper (equity 100 000)
+    seguía en vigor: V = -96 000 y E = 0."""
+    j = journal(tmp_path)
+    b1 = capital.resolve(j, None, 100_000.0, allocation=Allocation(**SEP))
+    assert b1.rebased and b1.allocated == pytest.approx(2_000.0)
+    real = dict(SEP, total_capital=20_000.0)
+    b2 = capital.resolve(j, None, 2_000.0, allocation=Allocation(**real), paper=False)
+    assert b2.rebased
+    assert b2.allocated == pytest.approx(2_000.0)
+    assert b2.value == pytest.approx(2_000.0) and b2.sizing == pytest.approx(2_000.0)
+    assert capital.current_base(j)["fp"]["paper"] is False
