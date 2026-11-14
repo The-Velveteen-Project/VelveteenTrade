@@ -125,11 +125,18 @@ def format_estado(broker, journal: Journal, capital: float | None,
                   base_current: bool = True) -> str:
     acct = broker.account()
     lines = [f"Equity de la cuenta demo: {_fmt_money(acct.equity)}"]
+    from .capital import rebase_blocked
+
+    blocked = rebase_blocked(journal)
     if capital is not None:
         from .capital import current_base
 
         base = current_base(journal)
-        if base and not base_current:
+        if blocked:
+            # C1: la base nueva está pospuesta; el motivo va en la línea ⛔.
+            lines.append(f"Tu capital de trabajo: {_fmt_money(capital)} (la base del "
+                         "satélite está en espera; no compra hasta abrirla)")
+        elif base and not base_current:
             # Endurecimiento R4: entre el despliegue y el primer ciclo la base
             # guardada es la de la configuración anterior (otra cifra de
             # satélite y quizá «núcleo de ETF»). No se mezcla con la nueva.
@@ -143,6 +150,9 @@ def format_estado(broker, journal: Journal, capital: float | None,
             sat = (f"; el sistema opera solo el satélite: {_fmt_money(base['allocated'])} "
                    f"({rest})") if base else " (el sistema opera solo con esto)"
             lines.append(f"Tu capital de trabajo: {_fmt_money(capital)}{sat}")
+    if blocked:
+        # C1: el último ciclo pospuso la base nueva del satélite (capital.resolve).
+        lines.append("⛔ En el último ciclo, " + blocked["message"])
     if acct.positions:
         lines.append("\nPosiciones:")
         for p in acct.positions.values():
@@ -160,6 +170,8 @@ def format_estado(broker, journal: Journal, capital: float | None,
 
 def format_cycle_summary(summary: dict, journal: Journal) -> str:
     lines = ["Ciclo completado."]
+    if summary.get("buys_blocked"):
+        lines.append("⛔ " + summary["buys_blocked"][0].upper() + summary["buys_blocked"][1:])
     if summary.get("stops"):
         lines.append("🛑 Stops ejecutados: " + ", ".join(summary["stops"]))
     if summary.get("stops_unchecked"):

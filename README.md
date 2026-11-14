@@ -102,6 +102,15 @@ cycle at 21:30 UTC, weekdays):
    `OPENAI_API_KEY`, `LLM_PROVIDER=openai`, `TELEGRAM_BOT_TOKEN`, `DATA_DIR=/data`.
 4. Commit `rag.db` (it ships with the image; it is derived, static data) — run
    `rag download` + `rag ingest` locally first.
+5. With `allocation.mode: separate_account` (config.yaml) the account is 100 %
+   satellite. Before the first deploy, look at the account's positions. If they
+   are worth more than the satellite, or buy orders are pending, the bot does
+   not open the satellite's capital base on top of them: it halts new buys
+   (stops and sells continue) and says so in the log and in `/estado`. Close
+   those positions by hand or reset the paper account; the next cycle opens a
+   clean base (`capital.py`, inherited positions). Set
+   `SATELLITE_TOTAL_CAPITAL` (digits only, no thousands separator) before the
+   deploy: changing it later opens a new base and empties the drawdown window.
 
 The Next.js dashboard (future) deploys separately on Vercel and reads the same data
 once it moves to a hosted DB.

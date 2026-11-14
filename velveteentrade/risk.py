@@ -103,6 +103,9 @@ class CycleContext:
     seeded: bool = False
     notes: list[str] = field(default_factory=list)
     unvalued: list[str] = field(default_factory=list)       # symbols we could not value
+    # C1: la base nueva del satélite está pospuesta (capital.resolve). Ninguna
+    # compra este ciclo; SELL y stops siguen. None = sin bloqueo.
+    halt_buys: str | None = None
     traded: set[str] = field(default_factory=set)            # symbols with an order this cycle
 
     def sector_of(self, symbol: str) -> str:
@@ -235,6 +238,11 @@ def evaluate(
         return v
 
     # ----------------------------------------------------------------- BUY
+    if ctx.halt_buys:
+        v.reasons.append("BUY rejected: satellite base on hold (inherited positions or "
+                         "pending buys) — new buys halted; see /estado.")
+        return v
+
     if ctx.unvalued:
         v.reasons.append(
             "BUY rejected: pending orders on "

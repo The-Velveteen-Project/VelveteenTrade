@@ -145,8 +145,15 @@ def _run_cycle(
     # $200 one, honestly.
     # R20: con allocation.mode = separate_account el núcleo vive en otra
     # cuenta y esta es 100 % satélite (20 % del total en paper, 10 % en real).
-    base = capital_mod.resolve(journal, prof, account.equity,
-                               allocation=settings.allocation, paper=settings.alpaca_paper)
+    # C1: con posiciones que valen más que S, o compras pendientes, la base
+    # nueva se pospone (capital.resolve) y este ciclo no compra.
+    base = capital_mod.resolve(
+        journal, prof, account.equity, allocation=settings.allocation,
+        paper=settings.alpaca_paper,
+        positions_value=sum(abs(p.market_value) for p in account.positions.values()),
+        pending_buys=sum(1 for o in pending if o.side == "buy"))
+    if base.blocked:
+        log.warning("Satellite base on hold — %s", base.blocked)
     if base.rebased:
         log.info("New capital base: satellite $%.2f (core %.0f%%, account $%.2f).",
                  base.allocated, base.core_weight * 100, account.equity)
@@ -156,17 +163,22 @@ def _run_cycle(
     # R31: el pico del freno es el máximo de las últimas N sesiones de la base
     # actual, no el histórico (que no se soltaba nunca tras quedar en efectivo).
     session = broker.session_date().isoformat()
-    since = (capital_mod.current_base(journal) or {}).get("since")
-    peak_equity = journal.update_window_peak(session, base.value, limits.drawdown_window_sessions,
-                                             since=since)
-    journal.record_equity(base.value)
+    if base.blocked:
+        # Sin base nueva no hay V que registrar ni pico que comparar: el track
+        # record y la ventana del freno empiezan cuando la base se abra.
+        peak_equity = None
+    else:
+        since = (capital_mod.current_base(journal) or {}).get("since")
+        peak_equity = journal.update_window_peak(session, base.value,
+                                                 limits.drawdown_window_sessions, since=since)
+        journal.record_equity(base.value)
 
     if pending:
         log.warning("Pending orders detected — skipping these symbols this cycle: %s",
                     sorted(pending_symbols))
 
     summary: dict = {"analyzed": [], "orders": [], "stops": [], "rejected": [],
-                     "pending_skipped": sorted(pending_symbols)}
+                     "pending_skipped": sorted(pending_symbols), "buys_blocked": base.blocked}
 
     # ------------------------------------------------ 1. Data + indicators
     snaps: dict[str, TechnicalSnapshot] = {}
@@ -194,7 +206,8 @@ def _run_cycle(
     for s, pos in account.positions.items():
         if s not in prices and pos.qty:
             prices[s] = abs(pos.market_value / pos.qty)
-    ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors, current_value=base.value)
+    ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors, current_value=base.value,
+                            halt_buys=base.blocked)
     ctx.seed(account, pending=pending, prices=prices, booked=booked)
     summary["session"] = session
     summary["turnover_seeded"] = round(ctx.turnover_used, 2)
