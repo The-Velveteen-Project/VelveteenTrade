@@ -103,6 +103,11 @@ class CycleContext:
     seeded: bool = False
     notes: list[str] = field(default_factory=list)
     unvalued: list[str] = field(default_factory=list)       # symbols we could not value
+    # C1: la base nueva del satélite está pospuesta (capital.resolve). Ninguna
+    # compra este ciclo. Los stops siguen (el barrido no pasa por evaluate).
+    # Una SELL del motor tampoco sale: con E = 0, _turnover_exceeded la
+    # rechaza. None = sin bloqueo.
+    halt_buys: str | None = None
     traded: set[str] = field(default_factory=set)            # symbols with an order this cycle
 
     def sector_of(self, symbol: str) -> str:
@@ -235,6 +240,11 @@ def evaluate(
         return v
 
     # ----------------------------------------------------------------- BUY
+    if ctx.halt_buys:
+        v.reasons.append("BUY rejected: satellite base on hold (inherited positions or "
+                         "pending buys) — new buys halted; see /estado.")
+        return v
+
     if ctx.unvalued:
         v.reasons.append(
             "BUY rejected: pending orders on "
@@ -350,9 +360,9 @@ def check_stops(account: AccountState, snaps: dict[str, TechnicalSnapshot], limi
     Positions without a frozen stop (opened before this rule) fall back to
     `entries[symbol] - stop_atr_mult * ATR`.
 
-    Price (B3): today's close if finite, else the broker's own mark
-    (market_value / qty). A stop is never skipped because one data source is
-    blank; if NO valid price or stop exists the position is logged as
+    Price (B3): the lower of today's close and the broker's own mark
+    (market_value / qty), whichever are finite. A stop is never skipped
+    because one data source is blank or stale; if NO valid price or stop exists the position is logged as
     unchecked (and listed in `unchecked`, when a list is passed).
     """
     stops = stops or {}
@@ -360,8 +370,14 @@ def check_stops(account: AccountState, snaps: dict[str, TechnicalSnapshot], limi
     for symbol, pos in account.positions.items():
         snap = snaps.get(symbol)
         price = snap.close if snap is not None and _finite(snap.close) else None
-        if price is None and _finite(pos.market_value, pos.qty) and pos.qty:
-            price = abs(pos.market_value / pos.qty)
+        mark = (abs(pos.market_value / pos.qty)
+                if _finite(pos.market_value, pos.qty) and pos.qty else None)
+        # Endurecimiento R2: the close can be stale (bars cached for 12 h) while
+        # the broker already marks the position below its stop. Judge the stop
+        # with the LOWER of the two, so neither source can hide a hit.
+        used_mark = mark is not None and (price is None or mark < price)
+        if used_mark:
+            price = mark
         if symbol in stops and _finite(stops[symbol]):
             stop = stops[symbol]
         else:
@@ -379,8 +395,8 @@ def check_stops(account: AccountState, snaps: dict[str, TechnicalSnapshot], limi
                 RiskVerdict(
                     symbol=symbol, approved=True, action="SELL", qty=pos.qty,
                     reasons=[f"STOP hit: price {price} <= stop {round(stop, 2)}"
-                             + ("" if snap is not None and price == snap.close
-                                else " (broker mark; no valid close today)") + "."],
+                             + (" (broker mark, below today's close or no valid close)"
+                                if used_mark else "") + "."],
                 )
             )
     return verdicts

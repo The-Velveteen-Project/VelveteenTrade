@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 
+from . import capital as capital_mod
 from . import profile as profile_mod
 from .advisor import explain_plan, extract_profile, interview
 from .broker import AlpacaBroker
@@ -120,16 +121,38 @@ def _fmt_money(x: float) -> str:
     return f"${x:,.2f}"
 
 
-def format_estado(broker, journal: Journal, capital: float | None) -> str:
+def format_estado(broker, journal: Journal, capital: float | None,
+                  base_current: bool = True) -> str:
     acct = broker.account()
     lines = [f"Equity de la cuenta demo: {_fmt_money(acct.equity)}"]
+    from .capital import rebase_blocked
+
+    blocked = rebase_blocked(journal)
     if capital is not None:
         from .capital import current_base
 
         base = current_base(journal)
-        sat = (f"; el sistema opera solo el satélite: {_fmt_money(base['allocated'])} "
-               "(el resto es tu núcleo de ETF)") if base else " (el sistema opera solo con esto)"
-        lines.append(f"Tu capital de trabajo: {_fmt_money(capital)}{sat}")
+        if blocked:
+            # C1: la base nueva está pospuesta; el motivo va en la línea ⛔.
+            lines.append(f"Tu capital de trabajo: {_fmt_money(capital)} (la base del "
+                         "satélite está en espera; no compra hasta abrirla)")
+        elif base and not base_current:
+            # Endurecimiento R4: entre el despliegue y el primer ciclo la base
+            # guardada es la de la configuración anterior (otra cifra de
+            # satélite y quizá «núcleo de ETF»). No se mezcla con la nueva.
+            lines.append(f"Tu capital de trabajo: {_fmt_money(capital)} (la configuración "
+                         "cambió: la base del satélite se renueva en el próximo ciclo)")
+        else:
+            # R20: con el núcleo en otra cuenta (huella core = 0) el resto de esta
+            # cuenta no es núcleo, es efectivo que el sistema no opera.
+            rest = ("el resto es tu núcleo de ETF" if base and (base.get("fp") or {}).get("core")
+                    else "el resto de esta cuenta no lo opera")
+            sat = (f"; el sistema opera solo el satélite: {_fmt_money(base['allocated'])} "
+                   f"({rest})") if base else " (el sistema opera solo con esto)"
+            lines.append(f"Tu capital de trabajo: {_fmt_money(capital)}{sat}")
+    if blocked:
+        # C1: el último ciclo pospuso la base nueva del satélite (capital.resolve).
+        lines.append("⛔ En el último ciclo, " + blocked["message"])
     if acct.positions:
         lines.append("\nPosiciones:")
         for p in acct.positions.values():
@@ -147,6 +170,8 @@ def format_estado(broker, journal: Journal, capital: float | None) -> str:
 
 def format_cycle_summary(summary: dict, journal: Journal) -> str:
     lines = ["Ciclo completado."]
+    if summary.get("buys_blocked"):
+        lines.append("⛔ " + summary["buys_blocked"][0].upper() + summary["buys_blocked"][1:])
     if summary.get("stops"):
         lines.append("🛑 Stops ejecutados: " + ", ".join(summary["stops"]))
     if summary.get("stops_unchecked"):
@@ -283,14 +308,14 @@ def run_bot(settings: Settings) -> None:
         prof = profile_mod.load(settings.profile_path)
         context_note = (f"[Contexto: el usuario tiene perfil guardado — {prof.name}, "
                         f"tolerancia efectiva {profile_mod.effective_tolerance(prof)}/5, "
-                        f"capital ${prof.capital or 'n/d'}]"
+                        f"capital de trabajo ${capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper) or 'n/d'}]"
                         if prof else "[Contexto: el usuario aún no tiene perfil — sugiérele /start]")
         # The chat must see the REAL system state — an advisor that improvises
         # numbers or claims "no trades today" blindly is worse than no advisor.
         try:
             snapshot = await asyncio.to_thread(
                 format_informe, _broker(), Journal(settings.db_path),
-                prof.capital if prof else None)
+                capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper))
             context_note += ("\n[Estado real del sistema ahora mismo — usa ESTOS datos, "
                              "no inventes cifras ni pidas comandos:]\n" + snapshot)
         except Exception as exc:  # noqa: BLE001
@@ -345,7 +370,10 @@ def run_bot(settings: Settings) -> None:
     async def estado(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         prof = profile_mod.load(settings.profile_path)
         await update.message.reply_text(
-            format_estado(_broker(), journal, prof.capital if prof else None))
+            format_estado(_broker(), journal,
+                          capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper),
+                          base_current=capital_mod.base_is_current(journal, prof, settings.allocation,
+                                                                   settings.alpaca_paper)))
 
     async def informe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         import asyncio
@@ -353,7 +381,7 @@ def run_bot(settings: Settings) -> None:
         prof = profile_mod.load(settings.profile_path)
         text = await asyncio.to_thread(
             format_informe, _broker(), Journal(settings.db_path),
-            prof.capital if prof else None)
+            capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper))
         await _send_long(ctx.bot, update.effective_chat.id, text)
 
     def _cycle_in_thread():

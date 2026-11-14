@@ -77,7 +77,7 @@ The suite covers the indicator math, every risk-gate rule, the cycle-level invar
 
 ## Scheduling
 
-`.github/workflows/daily.yml` runs the cycle on weekdays after US market close. Add `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, and `OPENAI_API_KEY` as repository secrets to enable it, and commit `journal.db` storage or swap it for a hosted DB if you want history across runs (a VPS with cron is the better home once the system matures).
+The only scheduler is the Telegram bot (see *Cloud deploy (Railway)* below): it runs the cycle on weekdays after US market close, with the journal on a persistent volume. There is no scheduled GitHub workflow; `.github/workflows/tests.yml` only runs the test suite and needs no secrets. Do not add broker or LLM keys as repository secrets: `python -m velveteentrade run` refuses to trade inside GitHub Actions (only `--dry-run` is allowed there), so a second scheduler cannot double the bot's cycle on the same account.
 
 ## Roadmap
 
@@ -102,6 +102,17 @@ cycle at 21:30 UTC, weekdays):
    `OPENAI_API_KEY`, `LLM_PROVIDER=openai`, `TELEGRAM_BOT_TOKEN`, `DATA_DIR=/data`.
 4. Commit `rag.db` (it ships with the image; it is derived, static data) — run
    `rag download` + `rag ingest` locally first.
+5. With `allocation.mode: separate_account` (config.yaml) the account is 100 %
+   satellite. Before the first deploy, look at the account's positions. If they
+   are worth more than the satellite, or buy orders are pending, the bot does
+   not open the satellite's capital base on top of them: it halts new buys
+   and says so in the log and in `/estado`. Stops still fire, but sells the
+   engine decides do not go out, because the turnover cap is measured
+   against a satellite equity of 0 while the base is on hold. Close
+   those positions by hand or reset the paper account; the next cycle opens a
+   clean base (`capital.py`, inherited positions). Set
+   `SATELLITE_TOTAL_CAPITAL` (digits only, no thousands separator) before the
+   deploy: changing it later opens a new base and empties the drawdown window.
 
 The Next.js dashboard (future) deploys separately on Vercel and reads the same data
 once it moves to a hosted DB.

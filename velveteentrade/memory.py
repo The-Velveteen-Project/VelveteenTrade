@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS stops (
     symbol TEXT PRIMARY KEY,
     stop_price REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS held_qty (
+    symbol TEXT PRIMARY KEY,
+    qty REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS lessons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -225,10 +229,13 @@ class Journal:
           pico de esta sesión (caduca a las `window` sesiones).
         - `window` mayor que la historia: el máximo de toda la historia de la
           base (el comportamiento de antes, mientras la historia sea corta).
+        - No se poda por `window` (R17 m1): se conservan las WINDOW_MAX
+          sesiones más recientes, así que subir o bajar W (dentro de las cotas
+          de config.check_window) es reversible y no pierde picos.
 
         Devuelve el pico de la ventana (None si no hay ningún valor finito) y
         lo deja en kv `peak_equity` para que se pueda consultar."""
-        from .config import check_window
+        from .config import WINDOW_MAX, check_window
         check_window(window)
         empty = self._conn.execute("SELECT COUNT(*) FROM session_peaks").fetchone()[0] == 0
         if empty:
@@ -239,13 +246,19 @@ class Journal:
                 "ON CONFLICT(session) DO UPDATE SET peak=MAX(session_peaks.peak, excluded.peak)",
                 (session, float(value)),
             )
+        # Poda por tamaño, nunca por `window` (R17 m1): solo se borra lo que
+        # queda fuera de las WINDOW_MAX sesiones más recientes hasta `session`,
+        # que ninguna W válida puede alcanzar. Antes se podaba lo que quedaba
+        # fuera de la W vigente y cambiar W perdía picos de forma irreversible.
+        horizon = self._conn.execute(
+            "SELECT session FROM session_peaks WHERE session <= ? "
+            "ORDER BY session DESC LIMIT 1 OFFSET ?", (session, WINDOW_MAX - 1)).fetchone()
+        if horizon is not None:
+            self._conn.execute("DELETE FROM session_peaks WHERE session < ?", (horizon[0],))
         # La ventana: las `window` sesiones más recientes hasta `session`.
-        # Las anteriores ya no cuentan para nada; se podan.
         keep = [r[0] for r in self._conn.execute(
             "SELECT session FROM session_peaks WHERE session <= ? ORDER BY session DESC LIMIT ?",
             (session, window)).fetchall()]
-        if keep:
-            self._conn.execute("DELETE FROM session_peaks WHERE session < ?", (min(keep),))
         row = self._conn.execute(
             "SELECT MAX(peak) FROM session_peaks WHERE session >= ? AND session <= ?",
             (min(keep), session)).fetchone() if keep else (None,)
@@ -300,14 +313,39 @@ class Journal:
         left by a manual close would otherwise be inherited by a later re-buy
         at a lower price and sell it at once. A stop with a queued buy behind
         it survives — that buy is about to become the position it protects.
+
+        Splits (endurecimiento R2): a frozen stop is an absolute price. After
+        a k:1 split the bars (Adjustment.ALL) and the broker mark move to the
+        new scale, so a stop left on the old one sells the whole position on
+        a 2:1 and never fires on a 1:10. A split is recognized when the qty
+        changes by k (|k - 1| >= 5 %) while the cost basis qty * avg_entry
+        stays put (within 0.5 %): a buy raises the basis and a sell lowers
+        it, so neither matches. The stop is then rescaled by 1/k. The first
+        reconcile after this change has no previous qty and cannot rescale.
+        [S] the broker adjusts qty and avg_entry on a split.
         """
         held = set(positions)
-        for symbol in list(self.entry_prices()):
+        old_entries = self.entry_prices()
+        old_qty = dict(self._conn.execute("SELECT symbol, qty FROM held_qty").fetchall())
+        stops = self.stop_prices()
+        for symbol, pos in positions.items():
+            k = _split_ratio(old_qty.get(symbol), old_entries.get(symbol), pos.qty, pos.avg_entry)
+            if k is not None and symbol in stops:
+                new_stop = stops[symbol] / k
+                log.warning("Split %.4g:1 on %s: stop %.4f -> %.4f.", k, symbol,
+                            stops[symbol], new_stop)
+                self._conn.execute("UPDATE stops SET stop_price = ? WHERE symbol = ?",
+                                   (new_stop, symbol))
+        for symbol in list(old_entries):
             if symbol not in held:
                 self._conn.execute("DELETE FROM entries WHERE symbol = ?", (symbol,))
-        for symbol in list(self.stop_prices()):
+        for symbol in list(stops):
             if symbol not in held and symbol not in pending_buys:
                 self._conn.execute("DELETE FROM stops WHERE symbol = ?", (symbol,))
+        self._conn.execute("DELETE FROM held_qty")
+        self._conn.executemany(
+            "INSERT INTO held_qty (symbol, qty) VALUES (?, ?)",
+            [(s, float(p.qty)) for s, p in positions.items() if _finite_pos(p.qty)])
         self._conn.commit()
         for symbol, pos in positions.items():
             if pos.avg_entry and pos.avg_entry > 0:
@@ -324,3 +362,22 @@ class Journal:
 
     def close(self) -> None:
         self._conn.close()
+
+
+def _finite_pos(x) -> bool:
+    try:
+        return math.isfinite(float(x)) and float(x) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _split_ratio(q0, e0, q1, e1) -> float | None:
+    """k = q1 / q0 if the change from (q0, e0) to (q1, e1) looks like a split,
+    else None. See Journal.reconcile_entries."""
+    if not all(_finite_pos(x) for x in (q0, e0, q1, e1)):
+        return None
+    k = float(q1) / float(q0)
+    if abs(k - 1.0) < 0.05:
+        return None
+    basis0, basis1 = float(q0) * float(e0), float(q1) * float(e1)
+    return k if abs(basis1 - basis0) <= 0.005 * basis0 else None

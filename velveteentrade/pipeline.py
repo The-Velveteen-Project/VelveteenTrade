@@ -32,6 +32,13 @@ class CycleInProgress(RuntimeError):
     """Raised instead of starting a cycle while another one is running."""
 
 
+class StopsNotSent(RuntimeError):
+    """Raised after the stop sweep when some stop sells could not be sent.
+
+    The sweep still sends every other stop first; the cycle then stops before
+    the gate, so no new buy goes out while a stop is pending by hand."""
+
+
 def _canon_queries(snap: TechnicalSnapshot, sector: str | None) -> dict[str, str]:
     """Deterministic, low-cardinality queries so embeddings cache well across symbols."""
     mom = "positive" if (snap.momentum_63d or 0) > 0 else "negative"
@@ -127,15 +134,26 @@ def _run_cycle(
     from . import capital as capital_mod
     from . import profile as profile_mod
 
+    # W (R31) y el umbral del freno salen de config.yaml, no del perfil
+    # (profile.CONFIG_OWNED).
     prof = profile_mod.load(settings.profile_path)
-    window = settings.risk.drawdown_window_sessions   # R31: de config.yaml, no del perfil
-    limits = profile_mod.limits_for(prof, window=window) if prof else settings.risk
+    limits = profile_mod.gate_limits(prof, settings.risk)
 
     # Capital base (B6/B8, see capital.py): size against the satellite the
     # user allocated (E); track record and drawdown halt read what it is
     # worth today (V), losses included — a $100k demo account trading like a
     # $200 one, honestly.
-    base = capital_mod.resolve(journal, prof, account.equity)
+    # R20: con allocation.mode = separate_account el núcleo vive en otra
+    # cuenta y esta es 100 % satélite (20 % del total en paper, 10 % en real).
+    # C1: con posiciones que valen más que S, o compras pendientes, la base
+    # nueva se pospone (capital.resolve) y este ciclo no compra.
+    base = capital_mod.resolve(
+        journal, prof, account.equity, allocation=settings.allocation,
+        paper=settings.alpaca_paper,
+        positions_value=sum(abs(p.market_value) for p in account.positions.values()),
+        pending_buys=sum(1 for o in pending if o.side == "buy"))
+    if base.blocked:
+        log.warning("Satellite base on hold — %s", base.blocked)
     if base.rebased:
         log.info("New capital base: satellite $%.2f (core %.0f%%, account $%.2f).",
                  base.allocated, base.core_weight * 100, account.equity)
@@ -145,17 +163,22 @@ def _run_cycle(
     # R31: el pico del freno es el máximo de las últimas N sesiones de la base
     # actual, no el histórico (que no se soltaba nunca tras quedar en efectivo).
     session = broker.session_date().isoformat()
-    since = (capital_mod.current_base(journal) or {}).get("since")
-    peak_equity = journal.update_window_peak(session, base.value, limits.drawdown_window_sessions,
-                                             since=since)
-    journal.record_equity(base.value)
+    if base.blocked:
+        # Sin base nueva no hay V que registrar ni pico que comparar: el track
+        # record y la ventana del freno empiezan cuando la base se abra.
+        peak_equity = None
+    else:
+        since = (capital_mod.current_base(journal) or {}).get("since")
+        peak_equity = journal.update_window_peak(session, base.value,
+                                                 limits.drawdown_window_sessions, since=since)
+        journal.record_equity(base.value)
 
     if pending:
         log.warning("Pending orders detected — skipping these symbols this cycle: %s",
                     sorted(pending_symbols))
 
     summary: dict = {"analyzed": [], "orders": [], "stops": [], "rejected": [],
-                     "pending_skipped": sorted(pending_symbols)}
+                     "pending_skipped": sorted(pending_symbols), "buys_blocked": base.blocked}
 
     # ------------------------------------------------ 1. Data + indicators
     snaps: dict[str, TechnicalSnapshot] = {}
@@ -183,7 +206,8 @@ def _run_cycle(
     for s, pos in account.positions.items():
         if s not in prices and pos.qty:
             prices[s] = abs(pos.market_value / pos.qty)
-    ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors, current_value=base.value)
+    ctx = risk.CycleContext(peak_equity=peak_equity, sectors=sectors, current_value=base.value,
+                            halt_buys=base.blocked)
     ctx.seed(account, pending=pending, prices=prices, booked=booked)
     summary["session"] = session
     summary["turnover_seeded"] = round(ctx.turnover_used, 2)
@@ -197,20 +221,38 @@ def _run_cycle(
     stop_verdicts = risk.check_stops(account, snaps, limits, entries,
                                      stops=journal.stop_prices(), unchecked=unchecked)
     summary["stops_unchecked"] = unchecked
+    stops_failed: list[str] = []
     for verdict in stop_verdicts:
         if verdict.symbol in pending_symbols:
             log.warning("Stop hit on %s but an order is already pending — not doubling.",
                         verdict.symbol)
             continue
-        order_id = broker.submit_order(verdict.symbol, verdict.qty, "sell")
+        # Endurecimiento R2: a broker exception on one stop must not keep the
+        # stops that come after it (in the stable order of account.positions)
+        # from going out — every cycle would cut at the same symbol.
+        try:
+            order_id = broker.submit_order(verdict.symbol, verdict.qty, "sell")
+        except Exception as exc:
+            log.error("STOP NOT SENT for %s: %s", verdict.symbol, exc)
+            stops_failed.append(f"{verdict.symbol} ({exc})")
+            continue
         ctx.mark_traded(verdict.symbol)
         if broker.sends_orders:
             journal.book_turnover(session, order_id,
                                   verdict.qty * prices.get(verdict.symbol, float("inf")))
-            journal.clear_entry(verdict.symbol)
+            # The frozen stop stays until the position is gone: a SELL that is
+            # rejected, cancelled or only partly filled leaves the lot in the
+            # account, and without its stop check_stops would fall back to the
+            # moving entry - k*ATR stop that breaks G2. reconcile_entries clears
+            # entry and stop once the broker no longer reports the position.
         journal.record(JournalEntry(symbol=verdict.symbol, verdict=verdict, executed=True,
                                     note=f"stop-loss order {order_id}"))
         summary["stops"].append(verdict.symbol)
+    if stops_failed:
+        raise StopsNotSent(
+            "stops sin enviar: " + ", ".join(stops_failed)
+            + ("; sí salieron: " + ", ".join(summary["stops"]) if summary["stops"] else "")
+            + ". Ninguna compra este ciclo; revisa esas posiciones a mano.")
 
     # ------------------------------------------------ 3. Candidate selection
     held_symbols = [s for s in account.positions if s in snaps and s not in summary["stops"]]
@@ -311,8 +353,8 @@ def _run_cycle(
                     if in_force != verdict.stop_price:
                         entry.note += (f"; frozen stop kept at {in_force} (tighten-only, "
                                        f"this lot's own stop {verdict.stop_price})")
-            else:
-                journal.clear_entry(symbol)
+            # SELL: entry and frozen stop are cleared by reconcile_entries once
+            # the position is gone, not here (the order may never fill).
             summary["orders"].append(f"{side.upper()} {symbol} x{verdict.qty}")
         else:
             summary["rejected"].append(f"{symbol}: {verdict.reasons[-1] if verdict.reasons else 'n/a'}")
