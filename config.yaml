@@ -47,7 +47,7 @@ risk:
   # Umbral del freno por drawdown. Rige aunque exista un perfil: el perfil fija
   # los demás límites, pero este umbral y la ventana de abajo salen siempre de
   # aquí (profile.CONFIG_OWNED). Decisión del 14 nov 2026: el satélite frena al
-  # 10 %, no al 5 % que daría un perfil de tolerancia 1.
+  # 10 %, aunque el perfil sugiera otro umbral.
   max_drawdown_halt_pct: 0.10
   # R31: el freno mide la caída contra el máximo de las últimas N sesiones
   # (antes: el máximo histórico, y el freno nunca se soltaba). 126 ≈ 6 meses.
