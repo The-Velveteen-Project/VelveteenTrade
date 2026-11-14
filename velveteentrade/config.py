@@ -1,7 +1,9 @@
 """Configuration: config.yaml (strategy/universe/risk) + .env (secrets)."""
 from __future__ import annotations
 
+import math
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +30,7 @@ class RiskLimits:
     stop_atr_mult: float = 2.0
     max_daily_turnover_pct: float = 0.25  # max fraction of equity traded per trading SESSION (all cycles; B2)
     max_drawdown_halt_pct: float = 0.10   # halt new BUYs beyond this peak-to-trough drawdown
+    # El umbral sale de config.yaml aunque exista un perfil (profile.CONFIG_OWNED).
     # R31: el pico del freno es el máximo de las últimas N sesiones (no el
     # histórico, que dejaba el freno puesto para siempre tras quedar en
     # efectivo). 126 ≈ medio año bursátil. Valor por defecto PROVISIONAL: lo
@@ -41,12 +44,97 @@ class RiskLimits:
         check_window(self.drawdown_window_sessions)
 
 
+# Cotas de la ventana del freno (R31; R17 m2 y m3).
+# - Mínimo 2: con W = 1 el pico es el máximo de la sesión actual y, con un
+#   ciclo diario, ninguna caída entre sesiones pone el freno (queda inerte).
+#   W = 2 es el menor valor que compara contra la sesión anterior. Una cota
+#   más alta (p. ej. 20) sería una decisión de política, no de corrección.
+# - Máximo 2520 ≈ diez años bursátiles (252 sesiones por año). Por encima de
+#   2**63 - 1 sqlite3 no liga el entero y cada ciclo lanzaba OverflowError
+#   antes del barrido de stops; con la cota, el error sale al arrancar.
+#   memory.py conserva session_peaks hasta este horizonte, así que cambiar W
+#   dentro de [WINDOW_MIN, WINDOW_MAX] es reversible.
+WINDOW_MIN = 2
+WINDOW_MAX = 2520
+
+
 def check_window(window: object) -> int:
-    """La ventana del freno (R31) debe ser un entero >= 1. Un valor inválido
-    detiene el arranque: nunca se adivina un freno."""
-    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
-        raise ValueError(f"drawdown_window_sessions debe ser un entero >= 1 (recibido: {window!r})")
+    """La ventana del freno (R31) debe ser un entero en [WINDOW_MIN, WINDOW_MAX].
+    Un valor inválido detiene el arranque: nunca se adivina un freno."""
+    if (isinstance(window, bool) or not isinstance(window, int)
+            or window < WINDOW_MIN or window > WINDOW_MAX):
+        raise ValueError(
+            f"drawdown_window_sessions debe ser un entero entre {WINDOW_MIN} y {WINDOW_MAX} "
+            f"(recibido: {window!r})")
     return window
+
+
+ALLOCATION_MODES = ("profile", "separate_account")
+SATELLITE_PCT_MAX = 0.20   # §4 de la torre: el satélite nunca pasa del 20 % del total
+# Cota de plausibilidad de total_capital: con el tope por posición más estricto
+# de la tabla de perfiles (5 %), el satélite debe poder abrir una orden de al
+# menos el mínimo del bróker (risk.MIN_ORDER_NOTIONAL = $1). Atrapa, por ejemplo,
+# "10.000" escrito con punto de miles, que YAML lee como 10.0.
+# Endurecimiento R2: risk._round_qty baja la cantidad a milésimas de acción, así
+# que el nocional puede quedar hasta 0,001 x precio bajo el tope. Con un tope de
+# exactamente $1 (total 200 en real) 2 de 5 precios redondos se rechazaban. El
+# tope por posición debe cubrir el mínimo más ese redondeo para precios de hasta
+# SATELLITE_MAX_PRICE_USD; por encima de ese precio la garantía no vale.
+SATELLITE_MIN_POSITION_PCT = 0.05
+SATELLITE_MIN_ORDER_USD = 1.0
+SATELLITE_QTY_STEP = 0.001
+SATELLITE_MAX_PRICE_USD = 1_000.0
+SATELLITE_MIN_POSITION_USD = SATELLITE_MIN_ORDER_USD + SATELLITE_QTY_STEP * SATELLITE_MAX_PRICE_USD
+
+
+@dataclass
+class Allocation:
+    """Reparto núcleo/satélite (R20).
+
+    - "profile" (comportamiento anterior): el núcleo de ETF vive en ESTA cuenta
+      y su peso sale de la tabla del perfil (`etf_core_weight`); el motor opera
+      (1 - peso) x capital declarado.
+    - "separate_account": el núcleo vive en OTRA cuenta, así que esta cuenta es
+      100 % satélite. El motor opera `total_capital` x pct, con pct =
+      `satellite_pct_paper` en paper y `satellite_pct_live` con dinero real.
+
+    Un valor inválido detiene el arranque: nunca se adivina un presupuesto."""
+
+    mode: str = "profile"
+    total_capital: float | None = None
+    satellite_pct_paper: float = 0.20
+    satellite_pct_live: float = 0.10
+
+    def __post_init__(self) -> None:
+        if self.mode not in ALLOCATION_MODES:
+            raise ValueError(f"allocation.mode debe ser uno de {ALLOCATION_MODES} (recibido: {self.mode!r})")
+        for name in ("satellite_pct_paper", "satellite_pct_live"):
+            pct = getattr(self, name)
+            if isinstance(pct, bool) or not isinstance(pct, (int, float)) \
+                    or not (0 < pct <= SATELLITE_PCT_MAX):
+                raise ValueError(f"allocation.{name} debe estar en (0, {SATELLITE_PCT_MAX}] (recibido: {pct!r})")
+        if self.mode == "separate_account":
+            cap = self.total_capital
+            if isinstance(cap, bool) or not isinstance(cap, (int, float)) \
+                    or not math.isfinite(cap) or cap <= 0:
+                raise ValueError("allocation.total_capital debe ser un número finito > 0 "
+                                 f"con mode=separate_account (recibido: {cap!r})")
+            pct = min(self.satellite_pct_paper, self.satellite_pct_live)
+            if cap * pct * SATELLITE_MIN_POSITION_PCT < SATELLITE_MIN_POSITION_USD:
+                piso = SATELLITE_MIN_POSITION_USD / (pct * SATELLITE_MIN_POSITION_PCT)
+                raise ValueError(
+                    f"allocation.total_capital = {cap!r} deja un satélite de ${cap * pct:,.2f}: "
+                    f"tras redondear a milésimas de acción, una orden podría no llegar al "
+                    f"mínimo de ${SATELLITE_MIN_ORDER_USD:.0f}. "
+                    f"Debe ser al menos {piso:,.0f}. ¿Escribiste los miles con punto "
+                    "(10.000 se lee como 10.0)? Escríbelo sin separador: 10000.")
+
+    def satellite_capital(self, paper: bool) -> float | None:
+        """Presupuesto del satélite en USD, o None en modo "profile"."""
+        if self.mode != "separate_account":
+            return None
+        pct = self.satellite_pct_paper if paper else self.satellite_pct_live
+        return float(self.total_capital) * float(pct)
 
 
 @dataclass
@@ -71,6 +159,7 @@ class Settings:
     candidates_per_cycle: int = 5   # how many screened symbols get full LLM analysis
     history_days: int = 320
     risk: RiskLimits = field(default_factory=RiskLimits)
+    allocation: Allocation = field(default_factory=Allocation)
     models: Models = field(default_factory=Models)
     alpaca_key: str = os.getenv("ALPACA_API_KEY", "")
     alpaca_secret: str = os.getenv("ALPACA_SECRET_KEY", "")
@@ -87,10 +176,31 @@ def load_settings(path: Path | None = None) -> Settings:
     raw = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
     risk = RiskLimits(**raw.get("risk", {}))
     models = Models(**raw.get("models", {}))
+    alloc_raw = dict(raw.get("allocation") or {})
+    env_total = os.environ.get("SATELLITE_TOTAL_CAPITAL", "").strip()
+    if env_total:
+        # Con dinero real el total real va en esta variable de servicio, no en
+        # el config.yaml del repo público. Solo dígitos y hasta dos decimales:
+        # "20.000" (punto de miles) se rechaza en vez de leerse como 20.
+        if not re.fullmatch(r"[0-9]+(\.[0-9]{1,2})?", env_total):
+            raise ValueError("SATELLITE_TOTAL_CAPITAL debe ser un número en USD sin separador "
+                             f"de miles, p. ej. 20000 (recibido: {env_total!r})")
+        alloc_raw["total_capital"] = float(env_total)
+    allocation = Allocation(**alloc_raw)
+    paper = os.getenv("ALPACA_PAPER", "true").lower() == "true"
+    if not paper and allocation.mode == "separate_account" and not env_total:
+        # El total_capital de config.yaml es el provisional de paper. Con dinero
+        # real usarlo en silencio dimensiona con otro S y, como el total entra
+        # en la huella de la base, re-basa y vacía la ventana del freno; al
+        # volver la variable re-basa otra vez y la caída acumulada se pierde.
+        raise ValueError("Con ALPACA_PAPER=false y allocation.mode=separate_account hace falta "
+                         "SATELLITE_TOTAL_CAPITAL (el total_capital de config.yaml es el "
+                         "provisional de paper). No arranco.")
     return Settings(
         universe=raw.get("universe", []),
         candidates_per_cycle=raw.get("candidates_per_cycle", 5),
         history_days=raw.get("history_days", 320),
         risk=risk,
+        allocation=allocation,
         models=models,
     )

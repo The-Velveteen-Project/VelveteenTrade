@@ -17,7 +17,7 @@ import pytest
 
 from velveteentrade import risk
 from velveteentrade.broker import AccountState, MockBroker
-from velveteentrade.config import RiskLimits, check_window, load_settings
+from velveteentrade.config import WINDOW_MAX, WINDOW_MIN, RiskLimits, check_window, load_settings
 from velveteentrade.memory import Journal
 from velveteentrade.schemas import ExecutiveDecision, TechnicalSnapshot
 
@@ -112,15 +112,20 @@ def test_ventana_mas_larga_que_la_historia_usa_toda_la_historia(tmp_path):
     j = Journal(tmp_path / "j.db")
     vals = [1_000.0, 1_200.0, 900.0, 950.0]
     for i, v in enumerate(vals):
-        peak = j.update_window_peak(sess(i), v, 10_000)
+        peak = j.update_window_peak(sess(i), v, WINDOW_MAX)
     assert peak == 1_200.0                                   # = pico histórico de la base
     assert halted(peak, 950.0)
 
 
-def test_ventana_de_una_sesion_es_el_maximo_de_hoy(tmp_path):
+def test_ventana_minima_compara_contra_la_sesion_anterior(tmp_path):
+    """R17 m3: W = 1 ya no es válido (apagaba el freno con un ciclo diario).
+    Con la ventana mínima, una caída de una sesión a la siguiente sí frena."""
+    assert WINDOW_MIN == 2
     j = Journal(tmp_path / "j.db")
-    j.update_window_peak(sess(0), 1_000.0, 1)
-    assert j.update_window_peak(sess(1), 500.0, 1) == 500.0
+    j.update_window_peak(sess(0), 1_000.0, WINDOW_MIN)
+    peak = j.update_window_peak(sess(1), 500.0, WINDOW_MIN)
+    assert peak == 1_000.0 and halted(peak, 500.0)
+    assert j.update_window_peak(sess(2), 500.0, WINDOW_MIN) == 500.0
 
 
 def test_valor_nan_no_se_guarda_y_la_puerta_falla_cerrada(tmp_path):
@@ -148,7 +153,7 @@ def test_sin_pico_no_hay_freno():
     assert buy_verdict(None, 1_000.0).approved
 
 
-@pytest.mark.parametrize("bad", [0, -1, 1.5, True, "126", None])
+@pytest.mark.parametrize("bad", [0, -1, 1, WINDOW_MAX + 1, 10**19, 1.5, True, "126", None])
 def test_ventana_invalida_se_rechaza(tmp_path, bad):
     with pytest.raises(ValueError):
         check_window(bad)

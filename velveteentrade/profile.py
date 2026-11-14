@@ -86,15 +86,41 @@ def effective_tolerance(profile: RiskProfile) -> int:
     return max(1, t)
 
 
-def limits_for(profile: RiskProfile, window: int | None = None) -> RiskLimits:
-    """Límites del perfil. `window` (R31) es la ventana del freno por drawdown:
-    no depende del perfil sino de config.yaml (la decide Carlos); None = el
-    valor por defecto de RiskLimits."""
+def limits_for(profile: RiskProfile, window: int | None = None,
+               halt: float | None = None) -> RiskLimits:
+    """Límites de la fila del perfil. `window` (R31) es la ventana del freno por
+    drawdown y `halt` su umbral; None deja el valor por defecto de RiskLimits
+    (window) o el de la fila (halt). La puerta no llama a esta función
+    directamente: usa gate_limits, que toma los dos de config.yaml."""
     row = _TOLERANCE_TABLE[effective_tolerance(profile)]
     kwargs = {k: v for k, v in row.items() if k != "etf_core_weight"}
     if window is not None:
         kwargs["drawdown_window_sessions"] = window
+    if halt is not None:
+        kwargs["max_drawdown_halt_pct"] = halt
     return RiskLimits(**kwargs)
+
+
+# Campos de RiskLimits que fija config.yaml aunque exista un perfil. La ventana
+# W del freno ya salía de config.yaml (R31). Desde el 14 nov 2026 también el
+# umbral: el satélite frena al 10 % de config.yaml aunque la fila del perfil
+# diga otra cosa (5 % con tolerancia efectiva 1). El freno protege al
+# satélite, cuyo presupuesto ya no fija el perfil (separate_account). La
+# columna max_drawdown_halt_pct de _TOLERANCE_TABLE queda como referencia y la
+# puerta no la aplica. El perfil sigue fijando los demás límites.
+CONFIG_OWNED = ("drawdown_window_sessions", "max_drawdown_halt_pct")
+
+
+def gate_limits(profile: RiskProfile | None, config_risk: RiskLimits) -> RiskLimits:
+    """Los límites que aplica la puerta. Sin perfil, los de config.yaml
+    (`config_risk`). Con perfil, los de su fila, salvo los campos de
+    CONFIG_OWNED, que salen de `config_risk`. Es idempotente: aplicarla sobre
+    su propio resultado no cambia nada, así que da igual que `config_risk` ya
+    venga de apply_profile (cli.main la llama al arrancar)."""
+    if profile is None:
+        return config_risk
+    return limits_for(profile, window=config_risk.drawdown_window_sessions,
+                      halt=config_risk.max_drawdown_halt_pct)
 
 
 def etf_core_weight(profile: RiskProfile) -> float:
@@ -115,8 +141,9 @@ def load(path: Path) -> RiskProfile | None:
 
 
 def apply_profile(settings: Settings) -> Settings:
-    """If a profile exists, its deterministic limits replace config.yaml's."""
+    """If a profile exists, its deterministic limits replace config.yaml's,
+    except the drawdown window and halt threshold (CONFIG_OWNED)."""
     profile = load(settings.profile_path)
     if profile is not None:
-        settings.risk = limits_for(profile, window=settings.risk.drawdown_window_sessions)
+        settings.risk = gate_limits(profile, settings.risk)
     return settings
