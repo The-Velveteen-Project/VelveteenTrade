@@ -106,7 +106,9 @@ cycle at 21:30 UTC, weekdays):
    satellite. Before the first deploy, look at the account's positions. If they
    are worth more than the satellite, or buy orders are pending, the bot does
    not open the satellite's capital base on top of them: it halts new buys
-   (stops and sells continue) and says so in the log and in `/estado`. Close
+   and says so in the log and in `/estado`. Stops still fire, but sells the
+   engine decides do not go out, because the turnover cap is measured
+   against a satellite equity of 0 while the base is on hold. Close
    those positions by hand or reset the paper account; the next cycle opens a
    clean base (`capital.py`, inherited positions). Set
    `SATELLITE_TOTAL_CAPITAL` (digits only, no thousands separator) before the

@@ -104,7 +104,9 @@ class CycleContext:
     notes: list[str] = field(default_factory=list)
     unvalued: list[str] = field(default_factory=list)       # symbols we could not value
     # C1: la base nueva del satélite está pospuesta (capital.resolve). Ninguna
-    # compra este ciclo; SELL y stops siguen. None = sin bloqueo.
+    # compra este ciclo. Los stops siguen (el barrido no pasa por evaluate).
+    # Una SELL del motor tampoco sale: con E = 0, _turnover_exceeded la
+    # rechaza. None = sin bloqueo.
     halt_buys: str | None = None
     traded: set[str] = field(default_factory=set)            # symbols with an order this cycle
 

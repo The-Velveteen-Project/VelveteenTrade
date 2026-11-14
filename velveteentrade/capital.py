@@ -48,7 +48,9 @@ Solo aplica con allocation.mode = separate_account, donde la cuenta es 100 %
 satélite; en modo "profile" el núcleo vive en esta misma cuenta y nada cambia.
 Mientras está pospuesta, la base anterior sigue guardada sin cambios, E = 0 y
 `blocked` lleva el motivo: el pipeline rechaza toda compra con ese mensaje y no
-registra V ni el pico; los stops y las ventas siguen. /estado lo muestra. La
+registra V ni el pico. Los stops siguen, porque el barrido no pasa por la
+puerta. Las ventas que decida el motor no salen: la puerta mide el turnover
+contra E = 0 y su tope queda en cero. /estado lo muestra. La
 salida la decide el usuario: cerrar esas posiciones a mano (o cancelar las
 órdenes) o reiniciar la cuenta paper. El primer ciclo con la cuenta en regla
 abre la base limpia. Posiciones que valen S o menos no bloquean: pasan a ser
@@ -159,7 +161,8 @@ def blocked_message(allocated: float, positions_value: float, pending_buys: int)
     if pending_buys:
         why.append(f"hay {pending_buys} orden(es) de compra pendiente(s) de antes")
     return ("compras bloqueadas: " + " y ".join(why) + ". El satélite no abre su base sobre "
-            "posiciones que no compró con su presupuesto; los stops y las ventas siguen. "
+            "posiciones que no compró con su presupuesto. Los stops siguen, pero las ventas "
+            "que decida el motor no salen, porque el tope de turnover se mide sobre E = 0. "
             "Qué hacer: cerrar esas posiciones a mano (y cancelar las órdenes pendientes), "
             "o reiniciar la cuenta paper. El ciclo siguiente abre la base limpia.")
 

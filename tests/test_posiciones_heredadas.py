@@ -7,8 +7,9 @@ el satélite heredaba esa cartera: en el segundo ciclo una caída de $650 en la
 cuenta bajaba V de 2000 a 1350 y el freno quedaba puesto 126 sesiones.
 
 Con la protección, la base nueva se pospone mientras las posiciones valgan más
-que S (o haya compras pendientes). No se compra; stops y ventas siguen. Al
-cerrar las posiciones a mano, el ciclo siguiente abre la base limpia.
+que S (o haya compras pendientes). No se compra. Los stops siguen, pero las
+ventas que decida el motor no salen (el tope de turnover se mide sobre E = 0).
+Al cerrar las posiciones a mano, el ciclo siguiente abre la base limpia.
 Sin red: bróker, datos y LLM son falsos.
 """
 from __future__ import annotations
@@ -231,3 +232,28 @@ def test_modo_profile_no_aplica_el_guardia(tmp_path):
     j = j_(tmp_path)
     b = capital.resolve(j, None, 100_000.0, positions_value=60_000.0, pending_buys=2)
     assert b.rebased and not b.blocked
+
+
+# ------------------------------------------------------- ventas durante el bloqueo
+def test_durante_el_bloqueo_las_ventas_del_motor_no_salen(tmp_path, monkeypatch):
+    """Con la base en espera E = 0, y la puerta mide el turnover contra E: el tope
+    es 0,25 x 0, así que toda venta que decida el motor se rechaza. Solo salen
+    los stops (el barrido no pasa por la puerta) y los cierres a mano. Fija el
+    comportamiento que documentan blocked_message, el README y el PR."""
+    from test_brechas import ScriptedLLM
+
+    s = make_settings(tmp_path, "vb", ["X"])
+    s.alpaca_paper = True
+    cuenta = Cuenta()
+    _, _, j = ciclo(s, cuenta, monkeypatch, None, 12, {"X": 50.0})
+    _, _, j = ciclo(s, cuenta, monkeypatch, j, 13, {"X": 50.0, "Y": 20.0})
+    s.allocation = Allocation(**SEP)
+    vende_y = ScriptedLLM(lambda x: dict(action="SELL" if x == "Y" else "HOLD", conviction=5))
+    sm, o, j = ciclo(s, cuenta, monkeypatch, j, 16, {"X": 50.0, "Y": 20.0}, llm=vende_y)
+    assert sm["buys_blocked"]
+    assert o == []
+    assert cuenta.qty == {"X": 200.0, "Y": 500.0}
+    assert any(r.startswith("Y:") and "session turnover budget exhausted" in r
+               for r in sm["rejected"]), sm["rejected"]
+    assert "las ventas que decida el motor no salen" in sm["buys_blocked"]
+    assert "Los stops siguen" in sm["buys_blocked"]
