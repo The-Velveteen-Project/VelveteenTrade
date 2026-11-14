@@ -225,10 +225,13 @@ class Journal:
           pico de esta sesión (caduca a las `window` sesiones).
         - `window` mayor que la historia: el máximo de toda la historia de la
           base (el comportamiento de antes, mientras la historia sea corta).
+        - No se poda por `window` (R17 m1): se conservan las WINDOW_MAX
+          sesiones más recientes, así que subir o bajar W (dentro de las cotas
+          de config.check_window) es reversible y no pierde picos.
 
         Devuelve el pico de la ventana (None si no hay ningún valor finito) y
         lo deja en kv `peak_equity` para que se pueda consultar."""
-        from .config import check_window
+        from .config import WINDOW_MAX, check_window
         check_window(window)
         empty = self._conn.execute("SELECT COUNT(*) FROM session_peaks").fetchone()[0] == 0
         if empty:
@@ -239,13 +242,19 @@ class Journal:
                 "ON CONFLICT(session) DO UPDATE SET peak=MAX(session_peaks.peak, excluded.peak)",
                 (session, float(value)),
             )
+        # Poda por tamaño, nunca por `window` (R17 m1): solo se borra lo que
+        # queda fuera de las WINDOW_MAX sesiones más recientes hasta `session`,
+        # que ninguna W válida puede alcanzar. Antes se podaba lo que quedaba
+        # fuera de la W vigente y cambiar W perdía picos de forma irreversible.
+        horizon = self._conn.execute(
+            "SELECT session FROM session_peaks WHERE session <= ? "
+            "ORDER BY session DESC LIMIT 1 OFFSET ?", (session, WINDOW_MAX - 1)).fetchone()
+        if horizon is not None:
+            self._conn.execute("DELETE FROM session_peaks WHERE session < ?", (horizon[0],))
         # La ventana: las `window` sesiones más recientes hasta `session`.
-        # Las anteriores ya no cuentan para nada; se podan.
         keep = [r[0] for r in self._conn.execute(
             "SELECT session FROM session_peaks WHERE session <= ? ORDER BY session DESC LIMIT ?",
             (session, window)).fetchall()]
-        if keep:
-            self._conn.execute("DELETE FROM session_peaks WHERE session < ?", (min(keep),))
         row = self._conn.execute(
             "SELECT MAX(peak) FROM session_peaks WHERE session >= ? AND session <= ?",
             (min(keep), session)).fetchone() if keep else (None,)
