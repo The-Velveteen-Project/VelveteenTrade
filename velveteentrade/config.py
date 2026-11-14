@@ -186,6 +186,15 @@ def load_settings(path: Path | None = None) -> Settings:
                              f"de miles, p. ej. 20000 (recibido: {env_total!r})")
         alloc_raw["total_capital"] = float(env_total)
     allocation = Allocation(**alloc_raw)
+    paper = os.getenv("ALPACA_PAPER", "true").lower() == "true"
+    if not paper and allocation.mode == "separate_account" and not env_total:
+        # El total_capital de config.yaml es el provisional de paper. Con dinero
+        # real usarlo en silencio dimensiona con otro S y, como el total entra
+        # en la huella de la base, re-basa y vacía la ventana del freno; al
+        # volver la variable re-basa otra vez y la caída acumulada se pierde.
+        raise ValueError("Con ALPACA_PAPER=false y allocation.mode=separate_account hace falta "
+                         "SATELLITE_TOTAL_CAPITAL (el total_capital de config.yaml es el "
+                         "provisional de paper). No arranco.")
     return Settings(
         universe=raw.get("universe", []),
         candidates_per_cycle=raw.get("candidates_per_cycle", 5),

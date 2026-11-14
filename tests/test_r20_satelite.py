@@ -360,3 +360,23 @@ def test_total_capital_from_service_variable(tmp_path, monkeypatch):
         monkeypatch.setenv("SATELLITE_TOTAL_CAPITAL", malo)
         with pytest.raises(ValueError):
             load_settings()
+
+
+def test_real_money_requires_the_service_variable(monkeypatch):
+    """Endurecimiento R4: con ALPACA_PAPER=false y separate_account, sin
+    SATELLITE_TOTAL_CAPITAL el arranque se detiene en vez de usar el 10000
+    provisional de config.yaml. Antes, perder la variable un día re-basaba
+    (S = 1000 en vez de 2000) y recuperarla re-basaba otra vez: el pico del
+    freno partía de lo que hubiera y la caída acumulada se perdía."""
+    monkeypatch.delenv("SATELLITE_TOTAL_CAPITAL", raising=False)
+    monkeypatch.setenv("ALPACA_PAPER", "false")
+    assert yaml.safe_load((ROOT / "config.yaml").read_text())["allocation"]["mode"] == "separate_account"
+    with pytest.raises(ValueError, match="SATELLITE_TOTAL_CAPITAL"):
+        load_settings()
+    monkeypatch.setenv("SATELLITE_TOTAL_CAPITAL", "20000")
+    s = load_settings()
+    assert s.allocation.satellite_capital(paper=False) == pytest.approx(2_000.0)
+    monkeypatch.setenv("ALPACA_PAPER", "true")              # en paper rige config.yaml
+    monkeypatch.delenv("SATELLITE_TOTAL_CAPITAL")
+    assert load_settings().allocation.total_capital == pytest.approx(10_000.0)
+
