@@ -69,6 +69,12 @@ def check_window(window: object) -> int:
 
 ALLOCATION_MODES = ("profile", "separate_account")
 SATELLITE_PCT_MAX = 0.20   # §4 de la torre: el satélite nunca pasa del 20 % del total
+# Cota de plausibilidad de total_capital: con el tope por posición más estricto
+# de la tabla de perfiles (5 %), el satélite debe poder abrir una orden de al
+# menos el mínimo del bróker (risk.MIN_ORDER_NOTIONAL = $1). Atrapa, por ejemplo,
+# "10.000" escrito con punto de miles, que YAML lee como 10.0.
+SATELLITE_MIN_POSITION_PCT = 0.05
+SATELLITE_MIN_ORDER_USD = 1.0
 
 
 @dataclass
@@ -103,6 +109,14 @@ class Allocation:
                     or not math.isfinite(cap) or cap <= 0:
                 raise ValueError("allocation.total_capital debe ser un número finito > 0 "
                                  f"con mode=separate_account (recibido: {cap!r})")
+            pct = min(self.satellite_pct_paper, self.satellite_pct_live)
+            if cap * pct * SATELLITE_MIN_POSITION_PCT < SATELLITE_MIN_ORDER_USD:
+                piso = SATELLITE_MIN_ORDER_USD / (pct * SATELLITE_MIN_POSITION_PCT)
+                raise ValueError(
+                    f"allocation.total_capital = {cap!r} deja un satélite de ${cap * pct:,.2f}: "
+                    f"ninguna orden llegaría al mínimo de ${SATELLITE_MIN_ORDER_USD:.0f}. "
+                    f"Debe ser al menos {piso:,.0f}. ¿Escribiste los miles con punto "
+                    "(10.000 se lee como 10.0)? Escríbelo sin separador: 10000.")
 
     def satellite_capital(self, paper: bool) -> float | None:
         """Presupuesto del satélite en USD, o None en modo "profile"."""

@@ -88,6 +88,24 @@ def test_invalid_allocation_stops_startup(over):
         Allocation(**{**SEP, **over})
 
 
+def test_thousands_dot_in_total_capital_stops_startup(tmp_path):
+    """`total_capital: 10.000` (punto de miles) es el float 10.0 para YAML: S = $2
+    en paper y ninguna orden llega a $1. Antes arrancaba sin error."""
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("allocation:\n  mode: separate_account\n  total_capital: 10.000\n"
+                   "  satellite_pct_paper: 0.20\n  satellite_pct_live: 0.10\n")
+    with pytest.raises(ValueError, match="punto"):
+        load_settings(cfg)
+
+
+def test_satellite_floor_matches_risk_and_profile_constants():
+    from velveteentrade import config as cfgmod, profile as pm, risk
+    assert cfgmod.SATELLITE_MIN_ORDER_USD == risk.MIN_ORDER_NOTIONAL
+    assert cfgmod.SATELLITE_MIN_POSITION_PCT == min(
+        row["max_position_pct"] for row in pm._TOLERANCE_TABLE.values())
+    Allocation(**{**SEP, "total_capital": 200.0})        # en el piso: S real = $20, 5 % = $1
+
+
 def test_invalid_allocation_in_yaml_stops_startup(tmp_path):
     cfg = tmp_path / "c.yaml"
     cfg.write_text(yaml.safe_dump({"allocation": {"mode": "separate_account"}}))
