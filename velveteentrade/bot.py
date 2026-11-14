@@ -121,20 +121,28 @@ def _fmt_money(x: float) -> str:
     return f"${x:,.2f}"
 
 
-def format_estado(broker, journal: Journal, capital: float | None) -> str:
+def format_estado(broker, journal: Journal, capital: float | None,
+                  base_current: bool = True) -> str:
     acct = broker.account()
     lines = [f"Equity de la cuenta demo: {_fmt_money(acct.equity)}"]
     if capital is not None:
         from .capital import current_base
 
         base = current_base(journal)
-        # R20: con el núcleo en otra cuenta (huella core = 0) el resto de esta
-        # cuenta no es núcleo, es efectivo que el sistema no opera.
-        rest = ("el resto es tu núcleo de ETF" if base and (base.get("fp") or {}).get("core")
-                else "el resto de esta cuenta no lo opera")
-        sat = (f"; el sistema opera solo el satélite: {_fmt_money(base['allocated'])} "
-               f"({rest})") if base else " (el sistema opera solo con esto)"
-        lines.append(f"Tu capital de trabajo: {_fmt_money(capital)}{sat}")
+        if base and not base_current:
+            # Endurecimiento R4: entre el despliegue y el primer ciclo la base
+            # guardada es la de la configuración anterior (otra cifra de
+            # satélite y quizá «núcleo de ETF»). No se mezcla con la nueva.
+            lines.append(f"Tu capital de trabajo: {_fmt_money(capital)} (la configuración "
+                         "cambió: la base del satélite se renueva en el próximo ciclo)")
+        else:
+            # R20: con el núcleo en otra cuenta (huella core = 0) el resto de esta
+            # cuenta no es núcleo, es efectivo que el sistema no opera.
+            rest = ("el resto es tu núcleo de ETF" if base and (base.get("fp") or {}).get("core")
+                    else "el resto de esta cuenta no lo opera")
+            sat = (f"; el sistema opera solo el satélite: {_fmt_money(base['allocated'])} "
+                   f"({rest})") if base else " (el sistema opera solo con esto)"
+            lines.append(f"Tu capital de trabajo: {_fmt_money(capital)}{sat}")
     if acct.positions:
         lines.append("\nPosiciones:")
         for p in acct.positions.values():
@@ -350,7 +358,10 @@ def run_bot(settings: Settings) -> None:
     async def estado(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         prof = profile_mod.load(settings.profile_path)
         await update.message.reply_text(
-            format_estado(_broker(), journal, capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper)))
+            format_estado(_broker(), journal,
+                          capital_mod.working_capital(settings.allocation, prof, settings.alpaca_paper),
+                          base_current=capital_mod.base_is_current(journal, prof, settings.allocation,
+                                                                   settings.alpaca_paper)))
 
     async def informe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         import asyncio

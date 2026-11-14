@@ -287,6 +287,30 @@ def test_working_capital_matches_the_satellite_the_engine_operates(tmp_path):
     assert b.allocated == pytest.approx(wc) and "$150.00" not in despues
 
 
+
+def test_estado_hides_the_stale_base_until_the_next_cycle(tmp_path):
+    """Endurecimiento R4: tras desplegar R20, la base guardada sigue siendo la
+    de main (perfil, núcleo 0,9, satélite pequeño: $15 aquí) hasta que el ciclo
+    llama a resolve. /estado decía a la vez $2.000 y $15 y llamaba «núcleo de ETF» a
+    una cuenta 100 % satélite. Ahora no muestra la base vieja."""
+    from velveteentrade.bot import format_estado
+
+    a = Allocation(**SEP)
+    j = journal(tmp_path)
+    capital.resolve(j, perfil_t1(), 100_000.0)                 # base de main
+    wc = capital.working_capital(a, perfil_t1(), paper=True)
+    assert not capital.base_is_current(j, perfil_t1(), a, paper=True)
+    viejo = format_estado(MockBroker(equity=100_000), j, wc)   # sin bandera: lo de antes
+    assert "$15.00" in viejo and "núcleo de ETF" in viejo
+    txt = format_estado(MockBroker(equity=100_000), j, wc,
+                        base_current=capital.base_is_current(j, perfil_t1(), a, paper=True))
+    assert "$2,000.00" in txt and "$15.00" not in txt and "núcleo de ETF" not in txt
+    assert "próximo ciclo" in txt
+    capital.resolve(j, perfil_t1(), 100_000.0, allocation=a)   # primer ciclo
+    assert capital.base_is_current(j, perfil_t1(), a, paper=True)
+    txt = format_estado(MockBroker(equity=100_000), j, wc, base_current=True)
+    assert "satélite: $2,000.00" in txt and "no lo opera" in txt
+
 # ------------------------------------------------------- ciclo único (daily.yml)
 WORKFLOWS = ROOT / ".github" / "workflows"
 

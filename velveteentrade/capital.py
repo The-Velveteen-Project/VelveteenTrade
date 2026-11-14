@@ -89,6 +89,15 @@ def current_base(journal: Journal) -> dict | None:
     return json.loads(stored) if stored else None
 
 
+def base_is_current(journal: Journal, profile: RiskProfile | None,
+                    allocation: Allocation | None = None, paper: bool = True) -> bool:
+    """True si la base guardada corresponde a la configuración en vigor. Tras
+    un despliegue que cambia la huella, la base vieja sigue guardada hasta que
+    el próximo ciclo llama a resolve; mientras tanto no se debe mostrar."""
+    base = current_base(journal)
+    return base is not None and base.get("fp") == _fingerprint(profile, allocation, paper)
+
+
 def pnl_since_base(journal: Journal) -> tuple[float, float, str | None] | None:
     """(start value, value now, since) of the equity series IN THE CURRENT BASE.
 
